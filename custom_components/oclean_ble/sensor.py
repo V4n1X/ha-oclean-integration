@@ -135,7 +135,7 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         key=DATA_BRUSH_HEAD_DAYS,
         translation_key=DATA_BRUSH_HEAD_DAYS,
         state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement="d",
+        native_unit_of_measurement=UnitOfTime.DAYS,
         icon="mdi:calendar-sync",
         entity_category=EntityCategory.DIAGNOSTIC,
         # headUsedDays from 0302 response: calendar days since last brush-head reset.

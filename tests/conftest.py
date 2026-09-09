@@ -104,6 +104,8 @@ def _install_ha_stubs() -> None:
     ce.ConfigEntry = ConfigEntry
     ce.ConfigFlow = _ConfigFlow
     ce.OptionsFlow = _OptionsFlow
+    ce.ConfigFlowResult = dict
+    ce.FlowResult = dict
 
     # ---- homeassistant.helpers (parent) ----
     _stub("homeassistant.helpers")
@@ -156,11 +158,12 @@ def _install_ha_stubs() -> None:
         pass
 
     class DataUpdateCoordinator:
-        def __init__(self, hass, logger, *, name, update_interval):
+        def __init__(self, hass, logger, *, name, update_interval, config_entry=None):
             self.hass = hass
             self.data = None
             self.last_update_success = True
             self.update_interval = update_interval
+            self.config_entry = config_entry
 
         async def async_config_entry_first_refresh(self):
             self.data = await self._async_update_data()

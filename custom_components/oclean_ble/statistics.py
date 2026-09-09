@@ -19,38 +19,43 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Unit classes accepted by StatisticMetaData.unit_class (HA >= 2026.7).
+_UNIT_CLASS_UNITLESS = "unitless"
+_UNIT_CLASS_DURATION = "duration"
+
 # Metrics exported to HA long-term statistics
-# (data_key, statistic_name_suffix, unit_of_measurement)
-_STAT_METRICS: tuple[tuple[str, str, str | None], ...] = (
-    (DATA_LAST_BRUSH_SCORE, "brush_score", "%"),
-    (DATA_LAST_BRUSH_DURATION, "brush_duration", "s"),
-    (DATA_LAST_BRUSH_PRESSURE, "brush_pressure", None),
+# (data_key, statistic_name_suffix, unit_of_measurement, unit_class)
+_STAT_METRICS: tuple[tuple[str, str, str | None, str], ...] = (
+    (DATA_LAST_BRUSH_SCORE, "brush_score", "%", _UNIT_CLASS_UNITLESS),
+    (DATA_LAST_BRUSH_DURATION, "brush_duration", "s", _UNIT_CLASS_DURATION),
+    (DATA_LAST_BRUSH_PRESSURE, "brush_pressure", None, _UNIT_CLASS_UNITLESS),
 )
 
 
 def _load_recorder_api():
     """Load recorder statistics API lazily (absent on some HA setups).
 
-    Returns (StatisticData, StatisticMetaData, async_add_external_statistics)
-    or None if the recorder component is unavailable.
-    """
-    try:
-        from homeassistant.components.recorder.statistics import (
-            StatisticData,
-            StatisticMetaData,
-            async_add_external_statistics,
-        )
+    Returns (StatisticData, StatisticMetaData, StatisticMeanType,
+    async_add_external_statistics) or None if the recorder component is
+    unavailable.
 
-        return StatisticData, StatisticMetaData, async_add_external_statistics
-    except ImportError:
-        pass
+    ``StatisticMeanType`` is required for ``StatisticMetaData.mean_type`` from
+    HA 2026.7 onward; omitting it stopped being accepted in HA 2026.11.  It is
+    imported separately so that older HA versions (which only know the
+    deprecated ``has_mean`` flag) still work.
+    """
     try:
         from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
         from homeassistant.components.recorder.statistics import async_add_external_statistics
-
-        return StatisticData, StatisticMetaData, async_add_external_statistics
     except ImportError:
         return None
+    # StatisticMeanType is only available from HA 2026.7 onward; older cores still
+    # accept the deprecated `has_mean` flag, so its absence is not fatal.
+    try:
+        from homeassistant.components.recorder.models import StatisticMeanType
+    except ImportError:
+        StatisticMeanType = None  # type: ignore[assignment,misc]
+    return StatisticData, StatisticMetaData, StatisticMeanType, async_add_external_statistics
 
 
 async def import_new_sessions(
@@ -86,11 +91,27 @@ async def import_new_sessions(
     if recorder_api is None:
         _LOGGER.debug("Oclean recorder statistics API not available; skipping history import")
         return last_session_ts
-    StatisticData, StatisticMetaData, async_add_external_statistics = recorder_api
+    StatisticData, StatisticMetaData, StatisticMeanType, async_add_external_statistics = recorder_api
+
+    def _mean_metadata(statistic_id: str, name: str, unit: str | None, unit_class: str) -> Any:
+        """Build StatisticMetaData with the mean fields required by HA >= 2026.7."""
+        kwargs: dict[str, Any] = {
+            "has_sum": False,
+            "name": name,
+            "source": DOMAIN,
+            "statistic_id": statistic_id,
+            "unit_of_measurement": unit,
+        }
+        if StatisticMeanType is not None:
+            kwargs["mean_type"] = StatisticMeanType.ARITHMETIC
+            kwargs["unit_class"] = unit_class
+        else:  # pragma: no cover – legacy HA without StatisticMeanType
+            kwargs["has_mean"] = True
+        return StatisticMetaData(**kwargs)
 
     from homeassistant.util import dt as dt_util
 
-    for data_key, stat_suffix, unit in _STAT_METRICS:
+    for data_key, stat_suffix, unit, unit_class in _STAT_METRICS:
         stat_rows: list[Any] = []
         for session in new_sessions:
             value = session.get(data_key)
@@ -103,13 +124,11 @@ async def import_new_sessions(
         if not stat_rows:
             continue
 
-        metadata = StatisticMetaData(
-            has_mean=True,
-            has_sum=False,
-            name=f"Oclean {device_name} {stat_suffix.replace('_', ' ').title()}",
-            source=DOMAIN,
-            statistic_id=f"{DOMAIN}:{mac_slug}_{stat_suffix}",
-            unit_of_measurement=unit,
+        metadata = _mean_metadata(
+            f"{DOMAIN}:{mac_slug}_{stat_suffix}",
+            f"Oclean {device_name} {stat_suffix.replace('_', ' ').title()}",
+            unit,
+            unit_class,
         )
         try:
             async_add_external_statistics(hass, metadata, stat_rows)
@@ -143,13 +162,11 @@ async def import_new_sessions(
             )
 
     for zone_name, stat_rows in area_stats_by_zone.items():
-        metadata = StatisticMetaData(
-            has_mean=True,
-            has_sum=False,
-            name=f"Oclean {device_name} Area {zone_name.replace('_', ' ').title()}",
-            source=DOMAIN,
-            statistic_id=f"{DOMAIN}:{mac_slug}_area_{zone_name}",
-            unit_of_measurement=None,
+        metadata = _mean_metadata(
+            f"{DOMAIN}:{mac_slug}_area_{zone_name}",
+            f"Oclean {device_name} Area {zone_name.replace('_', ' ').title()}",
+            None,
+            _UNIT_CLASS_UNITLESS,
         )
         try:
             async_add_external_statistics(hass, metadata, stat_rows)

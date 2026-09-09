@@ -1,5 +1,5 @@
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 line-length = 120
 
 [tool.ruff.lint]
@@ -36,6 +36,9 @@ ignore = [
     "PLR0912",
     "PLR0913",
     "PLR0915",
+    # Too many positional arguments – BLE command signatures and test helpers are
+    # inherently positional (added in ruff 0.16; the project predates it)
+    "PLR0917",
     "PLR1702",
     # Loop variable reassignment (part = part.strip()) is an acceptable idiom here
     "PLW2901",
@@ -59,7 +62,7 @@ ignore = [
 "custom_components/oclean_ble/statistics.py" = ["PLC0415"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_return_any = false

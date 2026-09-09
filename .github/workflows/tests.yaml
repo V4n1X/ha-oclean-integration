@@ -14,9 +14,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          # Home Assistant 2026.9.1 requires Python >= 3.14.2
+          python-version: "3.14"
       - name: Install dependencies
         run: pip install -r requirements-test.txt
+      - name: Verify target Home Assistant version
+        run: python -c "import homeassistant.const as c; assert c.__version__ == '2026.9.1', c.__version__; print('HA', c.__version__)"
       - name: Lint (ruff)
         run: ruff check custom_components/ tests/
       - name: Type check (mypy)

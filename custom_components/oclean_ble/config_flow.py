@@ -10,7 +10,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.helpers import selector
 
 from .const import (
@@ -88,7 +88,7 @@ class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignor
     # Bluetooth discovery (passive, triggered by HA bluetooth component)
     # ------------------------------------------------------------------
 
-    async def async_step_bluetooth(self, discovery_info: BluetoothServiceInfoBleak) -> FlowResult:
+    async def async_step_bluetooth(self, discovery_info: BluetoothServiceInfoBleak) -> ConfigFlowResult:
         """Handle device discovered via bluetooth integration."""
         await self.async_set_unique_id(discovery_info.address)
         self._abort_if_unique_id_configured()
@@ -99,7 +99,7 @@ class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignor
         self.context["title_placeholders"] = {"name": self._name}
         return await self.async_step_confirm()
 
-    async def async_step_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Confirm a bluetooth-discovered device."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -139,7 +139,7 @@ class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignor
     # Manual setup flow (user initiates via "Add Integration")
     # ------------------------------------------------------------------
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the initial step – show discovered devices or manual entry."""
         # Scan for already-discovered Oclean devices
         discovered = bluetooth.async_discovered_service_info(self.hass)
@@ -152,7 +152,7 @@ class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignor
 
         return await self.async_step_manual(user_input)
 
-    async def async_step_pick_device(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_pick_device(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Let the user pick from discovered devices."""
         errors: dict[str, str] = {}
 
@@ -196,7 +196,7 @@ class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignor
             ),
         )
 
-    async def async_step_manual(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_manual(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle manual MAC address entry."""
         errors: dict[str, str] = {}
 
@@ -273,7 +273,7 @@ class OcleanOptionsFlow(config_entries.OptionsFlow):
     # Step 1 – global settings + window count
     # ------------------------------------------------------------------
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             self._poll_interval = int(user_input[CONF_POLL_INTERVAL])
@@ -336,16 +336,16 @@ class OcleanOptionsFlow(config_entries.OptionsFlow):
     # Steps 2-4 – one step per poll window
     # ------------------------------------------------------------------
 
-    async def async_step_window_1(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_window_1(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return await self._async_step_window(1, user_input)
 
-    async def async_step_window_2(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_window_2(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return await self._async_step_window(2, user_input)
 
-    async def async_step_window_3(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_window_3(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return await self._async_step_window(3, user_input)
 
-    async def _async_step_window(self, num: int, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def _async_step_window(self, num: int, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
 
         if user_input is not None:

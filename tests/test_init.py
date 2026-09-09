@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import os
 import pathlib
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.oclean_ble import (
@@ -25,7 +26,9 @@ from custom_components.oclean_ble.const import (
     SERVICE_POLL,
 )
 
-_TMPDIR = os.environ.get("TMPDIR", "/tmp")
+# Cross-platform temporary directory.  The previous `os.environ.get("TMPDIR", "/tmp")`
+# resolved to a drive-relative "C:\tmp" on Windows, which is usually not writable.
+_TMPDIR = tempfile.gettempdir()
 
 
 def _make_hass(config_dir: str | None = None) -> MagicMock:
