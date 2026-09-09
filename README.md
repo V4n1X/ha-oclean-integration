@@ -245,9 +245,10 @@ Unknown notification types are logged as hex – this helps extend the parser.
 | Oclean X | OCLEANY3M | ✅ Tested | Battery, score, timestamp, duration, and scheme ID confirmed. Extended fields (areas, pressure) not supported by this device. |
 | Oclean X (HW variant) | OCLEANY3MH | ✅ Tested | Score, timestamp, duration, and pNum confirmed via `XX03` notification format (issue #19). |
 | Oclean X Pro | OCLEANY3 | ⚠️ Partial | Session data fetched via `0307` + `*B#` multi-packet reassembly; implementation complete but needs real-device confirmation. |
+| Oclean X Pro (S) | OCLEANY3S | ⚠️ Partial | APK protocol ID 9, handler `g.w0` mode 1 (same BLE stack as OCLEANY3M/Y3). Uses the `g.w0` 0302 settings layout (no battery/modeNum byte) and the 8-zone coverage threshold 9.0. Re-audited against the APK — see `docs/OCLEANY3S-AUDIT.md`; real-device confirmation pending. |
 | Oclean X Pro Elite | OCLEANY3P | ⚠️ Partial | Session metadata via `5100`, tooth areas via `021f`; implementation complete, full field confirmation pending. |
 | Oclean X Pro 20 | OCLEANX20 | ⚠️ Partial | Extended-offset inline `0307` format; timestamp and duration confirmed, further field testing pending. |
-| Oclean Z1 | OCLEANY5 | ⚠️ Partial | Type-Z1 protocol (APK handler C3350f mode=1): 0303/0202/0302 via fbb85, 0307 via fbb89, notify on fbb86+fbb90. Time calibration uses 0201 + 8-byte datetime format. Implementation complete (issue #69), real-device confirmation pending. |
+| Oclean Z1 | OCLEANY5 | ⚠️ Partial | Type-Z1 protocol (APK handler C3350f mode=1): 0303/0302 via fbb85, 0307 via fbb89, notify on fbb86+fbb90. Time calibration uses 0201 + 8-byte datetime format. Implementation complete (issue #69), real-device confirmation pending. |
 | Oclean Air 1 | OCLEANA1 | ✅ Tested | Battery confirmed. No CCCD on notify characteristic – uses direct READ fallback. Session fields not available on this model. |
 | Oclean Air 1 variants | OCLEANA1a–d | ⚠️ Partial | Same protocol as OCLEANA1; untested on real hardware. |
 | Oclean X Ultra | OCLEANV1a | ⚠️ Partial | Battery, timestamp, duration, programme confirmed. Score and tooth areas pending (issue #81). |
@@ -272,7 +273,7 @@ Unknown notification types are logged as hex – this helps extend the parser.
 
 ## Requirements
 
-- Home Assistant **2023.4** or newer
+- Home Assistant **2026.9** or newer (Python ≥ 3.14.2)
 - HA **Bluetooth** integration enabled (built-in; requires a compatible Bluetooth adapter or ESPHome proxy)
 - `bleak` and `bleak-retry-connector` are bundled with HA's bluetooth stack – no separate installation required
 

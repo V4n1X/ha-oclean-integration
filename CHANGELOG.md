@@ -1,5 +1,88 @@
 # Changelog
 
+## [v1.4.0] – 2026-09-09
+
+Fork of `deniskie/ha-oclean-integration` re-audited against the static analysis of
+the official **OClean Care+ 4.0.4** Android app, with **OCLEANY3S** (Oclean X
+Pro (S)) as the focus model. Every change below is backed by an APK citation; the
+full evidence trail is in [`docs/OCLEANY3S-AUDIT.md`](docs/OCLEANY3S-AUDIT.md).
+
+### Fixes
+
+- **Stop polling `0202` – it is `clearRunningDate`, not a device-info query.** ⚠️
+  The APK implements `0x0202` as `r0(listener)` in *every* protocol handler
+  (`g/w0.java:503-515`, `g/g.java:1011-1027`, …) and the public SDK facade exposes
+  exactly that method as `clearRunningDate(mac, listener)`
+  (`com/ocleanble/lib/OcleanBleManager.java:677-698`). The app calls it only after a
+  successful session upload (`OcleanDataService.java:663-664`, `:704`), i.e. it tells
+  the brush that its running data has been consumed. Sending it on **every** poll was
+  wrong and potentially destructive for unsynced sessions. It has been removed from all
+  protocol profiles; the constant is now `CMD_CLEAR_RUNNING_DATA`.
+- **`gesture_code` now reads record byte 18** (APK `g/w0.java:1078`/`:1087`,
+  `.put("gestureCode", byte18)`). Previously it read two bits of byte 30 — a
+  `powerArray` nibble with no relation to the gesture code.
+- **`gesture_array` now uses the APK's canonical 13-element layout (record bytes
+  18-30).** The operative APK branch (`f10129f == false`, because this app ships with
+  `VALIDATE="false"`) builds it from bytes 18-30 (`g/w0.java:1034-1073`). The 8 tooth
+  zones are the *tail* of that array (indices 5-12 = bytes 23-30, APK
+  `com/google/firebase/b.java:1020-1034`), so `last_brush_areas` and
+  `last_brush_coverage` are **unchanged**.
+- **Correct 0302 device-settings layout for the `g.w0` family (OCLEANY3S, OCLEANY3,
+  OCLEANY3M, …).** The payload has no battery byte and no modeNum byte: byte 0 is
+  `deviceTheme`, byte 5 is part of the voice-type word, `brushMode` is byte 12,
+  `headUsedDays` bytes 27-28, `headUsedTimes` bytes 29-30 and byte 31 is
+  `deviceLanguage` (`g/w0.java:1219-1272`). Previously the integration reported the
+  language code as `brush_head_usage` and the session count as `brush_head_days`, and
+  could overwrite the battery with the theme ID. A new
+  `DeviceProtocol.settings_layout` selects the layout per family; the historical
+  layout is kept for the families that actually use it (`g.n0`, `g.s`, `g.u0`,
+  `g.b0`, `g.x0`, `g.g`).
+- **New `TYPE1_Y3` protocol profile** for the APK `g.w0` mode-1 family
+  (`i/a.java:320-341`, cases 13-25). `OCLEANY3P`/`OCLEANY3PB`/`OCLEANY3PD` keep the
+  `TYPE1` profile — they are handled by `g.g` mode 0 (`i/a.java:342-352`) and have a
+  different 0302 layout.
+- **Long-term statistics: `has_mean` replaced by `mean_type` + `unit_class`.**
+  HA 2026.7 made `mean_type` mandatory and the deprecated `has_mean` flag stops
+  working in HA 2026.11. Older cores without `StatisticMeanType` fall back
+  automatically.
+- **`device_registry.async_get_device(identifiers=…)` is deprecated in HA 2026.9**;
+  the coordinator now prefers `async_get_device_id_by_identifier()` with a fallback
+  for older cores.
+- **Test portability:** `tests/test_init.py` used `TMPDIR`/`/tmp`, which resolved to
+  the unwritable `C:\tmp` on Windows and failed 8 tests. It now uses
+  `tempfile.gettempdir()`.
+
+### Changed
+
+- Target platform is **Home Assistant 2026.9.1** (requires Python ≥ 3.14.2):
+  `hacs.json` minimum `2026.9.0`, CI on Python 3.14, `pyproject.toml`
+  `target-version = py314`, `ConfigFlowResult` instead of `FlowResult`,
+  `UnitOfTime.DAYS` instead of the literal `"d"`, `pytest.ini` gets
+  `asyncio_default_fixture_loop_scope = function`.
+- `manifest.json`: added `integration_type: "device"` and `loggers`; `codeowners`,
+  `documentation` and `issue_tracker` point at this fork.
+- Brand assets: added `brand/dark_icon.png` and `brand/dark_icon@2x.png`; removed the
+  redundant legacy `images/` directory (HA ≥ 2026.3 and HACS use `brand/`).
+- `DataUpdateCoordinator` is now created with `config_entry=entry`.
+- New test module `tests/test_ocleany3s.py` (25 tests) covering the model mapping,
+  the poll command sequence, the `w0` 0302 layout, the 42-byte record offsets and the
+  coverage threshold.
+
+### Documented but intentionally unchanged
+
+- The APK writes `0303`/`030201` to `…bb85` and only `0307` to `…bb89`
+  (`g/w0.java:324`/`:375` vs. `:360`); the integration sends all queries via `fbb89`,
+  which is empirically confirmed to work. Left as-is pending a hardware test.
+- `0239` (brushing reminder) and `0240` (auto power-off timer) do not exist in `g.w0`
+  at all, so the corresponding switches are likely no-ops on OCLEANY3S. Kept for
+  other models; a model-capability gate (`cc.a`) is a follow-up.
+- The per-model pNum scheme list is cloud/DB delivered and **cannot** be derived from
+  the APK; `SCHEMES_BY_MODEL["OCLEANY3S"]` remains unconfirmed (documented).
+- `PERCENTAGE` as a sensor unit is deprecated in HA 2026.7, but no replacement name
+  is published yet — left unchanged rather than inventing one.
+
+---
+
 ## [v1.3.7] – 2026-06-17
 
 ### Fixes

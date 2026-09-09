@@ -4,26 +4,60 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 *.egg-info/
 dist/
 build/
 venv/
 .venv/
 
-# macOS
+# macOS / Windows
 .DS_Store
+Thumbs.db
+desktop.ini
 
 # Editor
 .vscode/
 .idea/
 *.swp
+*.swo
 
 # Test artifacts
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
 
-# Oclean API token (tools/oclean_api_test.py)
+# ---------------------------------------------------------------------------
+# Secrets / credentials – never commit these (see SECURITY.md)
+# ---------------------------------------------------------------------------
+# Oclean cloud session (tools/oclean_api_test.py writes this file)
 tools/.oclean_token.json
+.oclean_token.json
 
-# Local issue tracking
+# Generic credential / key material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+credentials.json
+secrets.yaml
+secrets.yml
+service-account*.json
+
+# Home Assistant runtime artifacts (never part of the integration)
+.storage/
+home-assistant*.log
+home-assistant_v2.db*
+oclean_ble.log*
+
+# Local issue tracking / scratch
 issues/
+scratch/
