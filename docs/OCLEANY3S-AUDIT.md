@@ -312,11 +312,27 @@ als **Ist-Werte**. Die Integration führt diese Schalter bisher als
 Gerätezustand zeigen – das ist eine sinnvolle, aber verhaltensändernde
 Folgeaufgabe (Switch-Semantik, Persistenz, `assumed_state`).
 
-### 3.7 `PERCENTAGE` als Einheit
+### 3.7 `PERCENTAGE` – geprüft, **nicht** veraltet
 
-HA hat `PERCENTAGE` ab 2026.7 als Einheit von Sensoren als veraltet markiert.
-Ein Ersatzname ist in der offiziellen Quelle nicht benannt; solange keiner
-dokumentiert ist, bleibt `PERCENTAGE` bestehen (kein Erfinden eines Ersatzes).
+Eine Web-Recherche behauptete, `PERCENTAGE` sei seit HA 2026.7 als Einheit
+veraltet. Der lokale Abgleich mit der installierten **HA 2026.9.1** widerlegt
+das: in `homeassistant/const.py:800-830` ist
+
+```python
+class UnitOfRatio(StrEnum):
+    PARTS_PER_MILLION = "ppm"
+    PARTS_PER_BILLION = "ppb"
+    PERCENTAGE = "%"
+
+PERCENTAGE: Final = UnitOfRatio.PERCENTAGE.value
+```
+
+also ein normaler String ohne `DeprecatedConstant`-Wrapper. Ein Import mit
+`warnings.simplefilter("always")` erzeugt **keine** DeprecationWarning.
+`PERCENTAGE` bleibt daher unverändert im Einsatz.
+
+*(Nur `ppm`/`ppb` haben veraltete Aliase – `_DEPRECATED_CONCENTRATION_PARTS_PER_MILLION`
+bzw. `…_BILLION`, Ablauf 2027.8.)*
 
 ---
 

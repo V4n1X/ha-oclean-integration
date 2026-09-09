@@ -88,8 +88,8 @@ full evidence trail is in [`docs/OCLEANY3S-AUDIT.md`](docs/OCLEANY3S-AUDIT.md).
   other models; a model-capability gate (`cc.a`) is a follow-up.
 - The per-model pNum scheme list is cloud/DB delivered and **cannot** be derived from
   the APK; `SCHEMES_BY_MODEL["OCLEANY3S"]` remains unconfirmed (documented).
-- `PERCENTAGE` as a sensor unit is deprecated in HA 2026.7, but no replacement name
-  is published yet — left unchanged rather than inventing one.
+- `PERCENTAGE` was checked against the installed HA 2026.9.1: it is a plain
+  `UnitOfRatio.PERCENTAGE.value` without a deprecation wrapper, so it stays.
 
 ---
 
