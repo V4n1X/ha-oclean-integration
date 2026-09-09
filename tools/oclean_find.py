@@ -5,7 +5,8 @@ Falls back to connecting unknown devices to read their GATT services.
 Usage:  python3 oclean_find.py
 """
 import asyncio
-from bleak import BleakScanner, BleakClient
+
+from bleak import BleakClient, BleakScanner
 
 OCLEAN_SERVICE_UUID = "8082caa8-41a6-4021-91c6-56f9b954cc18"
 

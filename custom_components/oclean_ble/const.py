@@ -388,6 +388,50 @@ SCHEMES_BY_MODEL: dict[str, dict[int, tuple[str, list[tuple[int, int]]]]] = {
     "OCLEANY5": OCLEANY5_SCHEMES,  # Oclean Z1 — different pnum range (91-104)
 }
 
+# Oclean GMT offset table (1-based, 33 entries) – from DateUtils.java / C3352g.java.
+# Used to map the local UTC offset to the tzIndex byte of the 0201 calibration command.
+TZ_OFFSETS_MIN: tuple[int, ...] = (
+    -720,
+    -660,
+    -600,
+    -540,
+    -480,
+    -420,
+    -360,
+    -300,
+    -240,
+    -210,
+    -180,
+    -120,
+    -60,
+    0,
+    60,
+    120,
+    180,
+    210,
+    240,
+    270,
+    300,
+    330,
+    345,
+    360,
+    390,
+    420,
+    480,
+    540,
+    570,
+    600,
+    660,
+    720,
+    780,
+)
+
+
+def oclean_tz_index(offset_minutes: int) -> int:
+    """Return the 1-based Oclean timezone index closest to *offset_minutes*."""
+    return min(range(len(TZ_OFFSETS_MIN)), key=lambda i: abs(TZ_OFFSETS_MIN[i] - offset_minutes)) + 1
+
+
 # Persistent storage for session history
 STORAGE_VERSION = 1
 

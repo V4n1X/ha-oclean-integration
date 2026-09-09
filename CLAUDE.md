@@ -10,9 +10,9 @@ pip install -r requirements-test.txt
 pytest
 ```
 
-### Lint (always include tests/)
+### Lint (always include tests/ and tools/)
 ```bash
-ruff check custom_components/ tests/
+ruff check custom_components/ tests/ tools/
 ```
 
 ### Run a single test file
@@ -44,8 +44,8 @@ BLE Device
             ├─ _read_device_info_service() → BLE DIS (model/fw/hw, cached 24 h)
             ├─ _subscribe_notifications()  → up to 4 GATT notify characteristics (per DeviceProtocol.notify_chars)
             ├─ _send_query_commands()      → CMD sequence from DeviceProtocol.query_commands
-            │                                TYPE1: 0303/0202/0302/0307 all via fbb89 (SEND_BRUSH_CMD_UUID)
-            │                                TYPE0: 0303/0202/0302/0308 all via fbb85 (WRITE_CHAR_UUID)
+            │                                TYPE1: 0303/030201 via fbb85, 0307 via fbb89 (APK-exact)
+            │                                TYPE0: 0303/030201/0308 all via fbb85 (WRITE_CHAR_UUID)
             ├─ _paginate_sessions()        → CMD 0309 via fbb85 until no new sessions (TYPE0 only)
             └─ _read_battery_and_unsubscribe()
                   → notification_handler() calls parse_notification()
@@ -144,17 +144,19 @@ grep -c "DIS read" oclean_ble.log
 > `clearRunningDate` and must never be polled. Full evidence:
 > [`docs/OCLEANY3S-AUDIT.md`](docs/OCLEANY3S-AUDIT.md).
 
-| Device | Model-ID | Protocol | All commands via | Session response | Extended fields |
+| Device | Model-ID | Protocol | Query commands via | Session response | Extended fields |
 |--------|----------|----------|-----------------|-----------------|-----------------|
-| Oclean X | OCLEANY3M | TYPE1_Y3 | fbb89 (SEND_BRUSH_CMD_UUID) | fbb90 (RECEIVE_BRUSH_UUID) | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). `0000`/`2604` enrichment pushes may additionally arrive. |
-| Oclean X Pro | OCLEANY3 | TYPE1_Y3 | fbb89 | fbb90 | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). Same `parse_t1_c3385w0_record` path as OCLEANY3M. |
-| Oclean X Pro (S) | OCLEANY3S | TYPE1_Y3 | fbb89 | fbb90 | Same as OCLEANY3M (APK `g.w0` mode 1, protocol ID 9). 0302 uses the `g/w0` layout; coverage threshold 9.0. |
-| Oclean X Pro Elite | OCLEANY3P | TYPE1 | fbb89 | fbb90 | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). NOT via `021f`/`5100`/`2604` pushes. |
+| Oclean X | OCLEANY3M | TYPE1_Y3 | 0303/030201 → fbb85, 0307 → fbb89 | fbb90 (RECEIVE_BRUSH_UUID) | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). `0000`/`2604` enrichment pushes may additionally arrive. |
+| Oclean X Pro | OCLEANY3 | TYPE1_Y3 | 0303/030201 → fbb85, 0307 → fbb89 | fbb90 | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). Same `parse_t1_c3385w0_record` path as OCLEANY3M. |
+| Oclean X Pro (S) | OCLEANY3S | TYPE1_Y3 | 0303/030201 → fbb85, 0307 → fbb89 | fbb90 | Same as OCLEANY3M (APK `g.w0` mode 1, protocol ID 9). 0302 uses the `g/w0` layout; coverage threshold 9.0. |
+| Oclean X Pro Elite | OCLEANY3P | TYPE1 | 0303/030201 → fbb85, 0307 → fbb89 | fbb90 | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). NOT via `021f`/`5100`/`2604` pushes. |
 | Oclean Air 1 | OCLEANA1 | LEGACY | fbb85 (WRITE_CHAR_UUID) | fbb86 READ (no CCCD) | None |
 
 **Unknown-model fallback (`protocol_for_model`).** An absent model ID (None/empty, pre-DIS) → `UNKNOWN` (discovery profile; DIS is re-read each poll). A *present but unmapped* model ID → `TYPE1` (every modern Oclean brush uses the TYPE1 stack), so new devices poll out of the box. A WARNING still logs the unrecognised ID asking the user to report it (that is how OCLEANX20/V1a/Y3PB were discovered). `is_known_model()` gates *write* features that need per-model data: the brush-scheme select is offered only for explicitly mapped models, never for the TYPE1 fallback (we won't guess a device's scheme list).
 
-**All TYPE1 devices** send query commands (0303/0202/0302/0307) via `fbb89` (`SEND_BRUSH_CMD_UUID`) during polls. Responses arrive as notifications on `fbb90` (`RECEIVE_BRUSH_UUID`) or `fbb86` (`READ_NOTIFY_CHAR_UUID`). The `write_char` field on `DeviceProtocol` controls which characteristic is used for one-off standalone writes (area_remind, brush_head_max_days, reset_brush_head, time calibration, brush scheme). For TYPE1, standalone writes use `fbb85` (`WRITE_CHAR_UUID`) — confirmed via APK `C3385w0_fallback.java` (the TYPE1 handler); only `0307` poll queries use `fbb89`. Note: `C3376s.java` in the APK sources is the handler for **WiFi-only devices** (model IDs 0005/0006/000D) and must not be used as a reference for TYPE1 BLE behavior.
+**All TYPE1 devices** send `0303` (status) and `030201` (settings) via `fbb85` (`WRITE_CHAR_UUID`) and **only** `0307` (running data) via `fbb89` (`SEND_BRUSH_CMD_UUID`) — exactly like the official app (`g/w0.java:324`/`:375` vs `:360`, `g/g.java:773`/`:848` vs `:825`, `g/f.java:245`/`:290` vs `:275`). Responses arrive as notifications on `fbb90` (`RECEIVE_BRUSH_UUID`) or `fbb86` (`READ_NOTIFY_CHAR_UUID`). The `write_char` field on `DeviceProtocol` controls which characteristic is used for one-off standalone writes (area_remind, brush_head_max_days, reset_brush_head, time calibration, brush scheme) — `fbb85` for all of them. Note: `C3376s.java` in the APK sources is the handler for **WiFi-only devices** (model IDs 0005/0006/000D) and must not be used as a reference for TYPE1 BLE behavior.
+
+**Firmware fragility (field-confirmed 2026-09-09).** A live test against a real OCLEANY3S (fw 1.0.0.19) froze the brush (software *and* hardware buttons unresponsive) while the integration deviated from the app's sequence. Keep the BLE traffic byte-identical to the APK: do **not** send `0202` (`clearRunningDate`), do **not** pre-clear the CCCD, do **not** pair, and route commands exactly as above. See `docs/OCLEANY3S-AUDIT.md` §2.9–2.11.
 
 **OCLEANY3M / OCLEANY3**: Both use `parse_t1_c3385w0_record` for the reassembled `*B#` record. **Score and per-zone tooth areas are inline in that record** (score = byte 33, areas = gestureArray bytes 23-30, time-per-zone). The `0000`/`2604` enrichment pushes on fbb90 are additional/optional — they were never the only source of areas. In inline mode (no new sessions) the 13-byte truncated record omits score and gestureArray; enrichment pushes may or may not follow depending on firmware.
 

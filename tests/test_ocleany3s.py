@@ -43,6 +43,7 @@ from custom_components.oclean_ble.const import (
     SEND_BRUSH_CMD_UUID,
     SETTINGS_LAYOUT_GENERIC,
     SETTINGS_LAYOUT_W0,
+    WRITE_CHAR_UUID,
 )
 from custom_components.oclean_ble.parser import (
     _parse_device_settings_response,
@@ -189,11 +190,17 @@ class TestOcleanY3SPollCommands:
         assert CMD_CLEAR_RUNNING_DATA not in cmds
 
     def test_sends_expected_queries(self):
+        """APK-exact routing: 0303/030201 on fbb85, only 0307 on fbb89."""
         assert TYPE1_Y3.query_commands == (
-            (SEND_BRUSH_CMD_UUID, CMD_QUERY_STATUS),
-            (SEND_BRUSH_CMD_UUID, CMD_QUERY_DEVICE_SETTINGS),
+            (WRITE_CHAR_UUID, CMD_QUERY_STATUS),
+            (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS),
             (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1),
         )
+
+    def test_only_0307_uses_the_brush_cmd_characteristic(self):
+        """g/w0.java:324/:375 write status+settings to fbb85; only :360 uses fbb89."""
+        brush_cmds = [cmd for char, cmd in TYPE1_Y3.query_commands if char == SEND_BRUSH_CMD_UUID]
+        assert brush_cmds == [CMD_QUERY_RUNNING_DATA_T1]
 
 
 # ===========================================================================

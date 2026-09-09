@@ -198,22 +198,73 @@ Cores ohne `StatisticMeanType` fällt der Code automatisch auf `has_mean` zurüc
 löst das zu `C:\tmp` auf, das üblicherweise nicht schreibbar ist → 8 Tests
 schlugen mit `PermissionError` fehl. **Fix:** `tempfile.gettempdir()`.
 
+### 2.9 Kommandopfad: 0303/030201 gingen an `…bb89` statt `…bb85` ⚠️
+
+**Befund:** Die APK schreibt **alle** Kommandos außer `0307` auf
+`f10134k` = `9d84b9a3-…bb85` und **nur** `0307` auf `y` =
+`5f78df94-…bb89`. Das gilt einheitlich für alle Protokollklassen:
+
+| Kommando | APK-Ziel | Beleg |
+|---|---|---|
+| `0303` (Status) | `…bb85` | `g/w0.java:324`, `:328`; `g/g.java:773-785`; `g/f.java:245`, `:249` |
+| `030201` (Settings) | `…bb85` | `g/w0.java:375`, `:379`; `g/g.java:848-860`; `g/f.java:290`, `:294` |
+| `0307` (Running Data) | `…bb89` | `g/w0.java:360`, `:364`; `g/g.java:825-837`; `g/f.java:275`, `:279` |
+| `0201`, `0206`, `020D`, `020F`, `0212`, `0217` | `…bb85` | `g/w0.java:248/486/339/179/194/1311` |
+
+Die Integration sendete `0303` und `030201` über `…bb89`.
+
+**Fix:** `TYPE1.query_commands` (und damit `TYPE1_Y3`) nutzt jetzt exakt die
+APK-Zuordnung: `0303` und `030201` → `WRITE_CHAR_UUID` (`…bb85`), `0307` →
+`SEND_BRUSH_CMD_UUID` (`…bb89`). `TYPE_Z1`, `LEGACY` und `UNKNOWN` waren bereits
+korrekt.
+
+### 2.10 Kein proaktives CCCD-Löschen mehr
+
+**Befund:** Die Integration schrieb vor jedem `start_notify` den Wert `0x0000`
+in das Client-Configuration-Descriptor. Die APK tut das **nicht**: ihr Helfer
+`g/e.java:W(suuid, cuuid)` ruft `setCharacteristicNotification(true)` und
+schreibt danach einmalig `ENABLE_NOTIFICATION_VALUE` bzw.
+`ENABLE_INDICATION_VALUE` – abhängig von den Characteristic-Properties
+(`g/e.java`, `W()`-Implementierung).
+
+**Fix:** Der Normalfall ist jetzt ein einfaches `start_notify`. Das CCCD-Löschen
+bleibt **ausschließlich** als einmaliger Wiederholungsversuch erhalten, wenn
+`start_notify` mit „Notify acquired" oder einem Timeout fehlschlägt.
+
+### 2.11 Feldbefund: Firmware-Hänger durch abweichenden BLE-Verkehr
+
+Bei einem Live-Test am realen OCLEANY3S (`70:28:45:68:4A:77`, fw `1.0.0.19`,
+hw `Rev.D`) ist die Bürste während der Tests **eingefroren**: Bedienung und
+Hardwaretasten reagierten nicht mehr; laut Nutzer ein bekanntes Verhalten bei
+„falschen BLE-Zugriffen", das sich erst nach längerer Zeit oder Akku-Entladung
+wieder löst.
+
+Der Test hat dabei mehrere Abweichungen von der App erzeugt, die als Ursache in
+Frage kommen:
+
+* `0303`/`030201` wurden auf `…bb89` statt `…bb85` geschrieben (Abschnitt 2.9);
+* das CCCD wurde vorab mit `0x0000` beschrieben (Abschnitt 2.10);
+* zusätzlich wurden auf Windows-Seite `pair()`/`unpair()` aufgerufen und die
+  Verbindung mehrfach neu aufgebaut.
+
+**Konsequenz:** Die Sequenz wurde auf 1:1 APK-Verhalten reduziert. Für weitere
+Hardware-Tests gilt: **nicht pairen**, kein CCCD-Pre-Clear, Kommandos exakt nach
+APK-Zuordnung, und pro Versuch genau ein Verbindungsaufbau. Das Skript
+`tools/oclean_live_check.py` implementiert das und ist bewusst zurückhaltend
+(opt-in `--no-unpair`, Default: kein Pairing).
+
+**UNBELEGT:** welcher der drei Punkte den Hänger ausgelöst hat – das Gerät erholt
+sich erst wieder, danach kann mit der APK-treuen Sequenz erneut getestet werden.
+
 ---
 
 ## 3. Befunde ohne Codeänderung (dokumentiert, bewusst nicht geändert)
 
-### 3.1 Kommandopfad: APK nutzt für 0303/030201 `…bb85`, die Integration `…bb89`
+### 3.1 ~~Kommandopfad~~ → behoben, siehe 2.9
 
-`g/w0.java:324`/`:328` (0303), `:375`/`:379` (030201) schreiben auf
-`f10134k` = `9d84b9a3-…bb85`; **nur** `0307` geht auf `y` =
-`5f78df94-…bb89` (`:360`/`:364`). Die Integration sendet alle vier Kommandos
-über `fbb89`.
-
-**Nicht geändert**, weil die Feldprotokolle (Issue #49, #37) zeigen, dass die
-Geräte auf `fbb89` antworten – viele Oclean-Firmwaren akzeptieren offenbar
-beide Schreib-Characteristics. Eine Umstellung ohne Hardware-Test wäre ein
-Risiko. Als **Folgeaufgabe** dokumentiert: wer ein OCLEANY3S zur Hand hat, kann
-die APK-Variante testen.
+Der in der ersten Fassung dieses Dokuments als „nicht geändert" dokumentierte
+Punkt ist nach dem Firmware-Hänger (2.11) **umgesetzt** worden: `0303`/`030201`
+gehen jetzt wie in der APK an `…bb85`.
 
 ### 3.2 `0239` / `0240` existieren in `g.w0` nicht
 

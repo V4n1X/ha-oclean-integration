@@ -52,7 +52,6 @@ except Exception:
 
 from custom_components.oclean_ble.parser import parse_notification  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Log line regexes
 # ---------------------------------------------------------------------------
@@ -325,7 +324,7 @@ def _gen_test(poll: _Poll, index: int, mac: str) -> str:
     indent = "        "
 
     body = [
-        f"    @pytest.mark.asyncio",
+        "    @pytest.mark.asyncio",
         f"    async def {name}(self):",
         f'        """Poll {poll.timestamp} – '
         f'battery={poll.battery}, {poll.session_count} session(s) '
@@ -371,11 +370,8 @@ def generate(polls: list[_Poll]) -> str:
         if not interesting:
             continue
 
-        # Detect model from collected info in any poll (best-effort)
-        model = next(
-            (p.notifications[0].raw_hex[:4] for p in interesting),
-            ""
-        )
+        # NOTE: the model ID is not derivable from the captured notification bytes
+        # alone (it comes from the BLE DIS), so the generated tests stay model-agnostic.
 
         class_name = "TestGenerated_" + mac.replace(":", "_")
         sections.append(f"class {class_name}:")

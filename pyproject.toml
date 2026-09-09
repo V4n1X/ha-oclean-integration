@@ -60,6 +60,18 @@ ignore = [
 # device_registry and recorder API must be loaded at runtime
 "custom_components/oclean_ble/coordinator.py" = ["PLC0415"]
 "custom_components/oclean_ble/statistics.py" = ["PLC0415"]
+# Standalone CLI tools: print() is the UI, broad excepts are deliberate
+# (a missing GATT characteristic must not abort the capture), and the style
+# rules below would only add churn.  Pyflakes (F) stays enabled so undefined
+# names and dead code are still caught.
+"tools/*" = [
+    "T201",   # print in CLI output
+    "BLE001", # blind except around best-effort GATT calls
+    "PLC0415",# lazy imports to keep startup cheap
+    "ASYNC250", "ASYNC230", "ASYNC240", "ASYNC109", "ASYNC110",  # interactive CLI helpers
+    "PTH123", "PTH120", "PTH118",  # plain open()/os.path is fine here
+    "PERF401", "SIM105", "SIM103", "PLR1714", "PLR0911", "ISC004", "I001",
+]
 
 [tool.mypy]
 python_version = "3.14"

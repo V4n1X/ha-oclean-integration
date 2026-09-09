@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import importlib.util
 import logging
 import struct
 import sys
-import types
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -58,28 +59,37 @@ for _pkg in ("custom_components", "custom_components.oclean_ble"):
 
 _const = _load_oclean_module("const")
 _parser_mod = _load_oclean_module("parser")
+_protocol_mod = _load_oclean_module("protocol")
 
 # Constants from const.py
 BATTERY_CHAR_UUID             = _const.BATTERY_CHAR_UUID
 BLE_NOTIFICATION_WAIT         = _const.BLE_NOTIFICATION_WAIT
 CHANGE_INFO_UUID              = _const.CHANGE_INFO_UUID
 CMD_CALIBRATE_TIME_PREFIX     = _const.CMD_CALIBRATE_TIME_PREFIX
+CMD_CALIBRATE_TIME_T1_PREFIX  = _const.CMD_CALIBRATE_TIME_T1_PREFIX
 CMD_CLEAR_BRUSH_HEAD          = _const.CMD_CLEAR_BRUSH_HEAD
-CMD_DEVICE_INFO               = _const.CMD_DEVICE_INFO
+# 0x0202 is clearRunningDate – it must never be polled (see docs/OCLEANY3S-AUDIT.md).
+CMD_CLEAR_RUNNING_DATA        = _const.CMD_CLEAR_RUNNING_DATA
 CMD_QUERY_RUNNING_DATA        = _const.CMD_QUERY_RUNNING_DATA
 CMD_QUERY_RUNNING_DATA_NEXT   = _const.CMD_QUERY_RUNNING_DATA_NEXT
 CMD_QUERY_RUNNING_DATA_T1     = _const.CMD_QUERY_RUNNING_DATA_T1
 CMD_QUERY_STATUS              = _const.CMD_QUERY_STATUS
+DIS_HW_REV_UUID               = _const.DIS_HW_REV_UUID
+DIS_MODEL_UUID                = _const.DIS_MODEL_UUID
+DIS_SW_REV_UUID               = _const.DIS_SW_REV_UUID
 OCLEAN_SERVICE_UUID           = _const.OCLEAN_SERVICE_UUID
 READ_NOTIFY_CHAR_UUID         = _const.READ_NOTIFY_CHAR_UUID
 RECEIVE_BRUSH_UUID            = _const.RECEIVE_BRUSH_UUID
 SEND_BRUSH_CMD_UUID           = _const.SEND_BRUSH_CMD_UUID
+SETTINGS_LAYOUT_GENERIC       = _const.SETTINGS_LAYOUT_GENERIC
 TOOTH_AREA_NAMES              = _const.TOOTH_AREA_NAMES
 WRITE_CHAR_UUID               = _const.WRITE_CHAR_UUID
 
-# Functions from parser.py
+# Functions from parser.py / protocol.py / const.py
 parse_notification = _parser_mod.parse_notification
 parse_battery      = _parser_mod.parse_battery
+protocol_for_model = _protocol_mod.protocol_for_model
+oclean_tz_index    = _const.oclean_tz_index
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -139,6 +149,7 @@ async def single_poll(
     brushing_mode: bool = False,
     max_pages: int = 0,
     reset_brush_head: bool = False,
+    calibrate: bool = True,
 ) -> dict[str, Any]:
     """Connect, read data, disconnect – exactly like OcleanCoordinator._setup_and_read().
 
@@ -150,6 +161,8 @@ async def single_poll(
                           0 = no pagination (default).
         reset_brush_head: Send CMD_CLEAR_BRUSH_HEAD (020F) before disconnecting.
                           ⚠️  This resets the brush head wear counter on the device!
+        calibrate:        Send the 0201 time-calibration command (default True, like the
+                          coordinator). Use --no-calibrate for a read-only diagnostic run.
     """
     from bleak import BleakClient
 
@@ -161,11 +174,13 @@ async def single_poll(
     all_sessions: list[dict[str, Any]] = []
     seen_ts: set[int] = set()
     session_received = asyncio.Event()
+    # Selected after the DIS read; defaults to the generic 0302 layout.
+    state: dict[str, Any] = {"layout": SETTINGS_LAYOUT_GENERIC, "model": None}
 
     def notification_handler(sender: Any, raw: bytearray) -> None:
         data = bytes(raw)
         _LOG.info("NOTIFY  raw=%s", data.hex())
-        parsed = parse_notification(data)
+        parsed = parse_notification(data, state["layout"])
         if parsed:
             _LOG.info("NOTIFY  parsed=%s", parsed)
             collected.update(parsed)
@@ -183,56 +198,82 @@ async def single_poll(
 
         await asyncio.sleep(2.0)
 
-        # 1. Time calibration
-        ts = int(time.time())
-        cal_cmd = CMD_CALIBRATE_TIME_PREFIX + struct.pack(">I", ts)
-        try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, cal_cmd, response=True)
-            _LOG.info("✓ Time calibration sent (ts=%d)", ts)
-        except Exception as e:
-            _LOG.warning("✗ Time calibration: %s", e)
+        # 0. Device Information Service – selects the protocol profile
+        for key, uuid in (
+            ("model", DIS_MODEL_UUID),
+            ("fw", DIS_SW_REV_UUID),
+            ("hw", DIS_HW_REV_UUID),
+        ):
+            try:
+                value = (await client.read_gatt_char(uuid)).decode("utf-8").strip("\x00").strip()
+                _LOG.info("DIS %-5s = %r", key, value)
+                if key == "model":
+                    state["model"] = value or None
+            except Exception as e:
+                _LOG.warning("DIS %-5s read failed: %s", key, e)
 
-        # 2. Subscribe to notifications
-        notify_chars = (
-            READ_NOTIFY_CHAR_UUID,
-            RECEIVE_BRUSH_UUID,
-            CHANGE_INFO_UUID,
-            SEND_BRUSH_CMD_UUID,
+        profile = protocol_for_model(state["model"])
+        state["layout"] = profile.settings_layout
+        _LOG.info(
+            "Protocol profile: %s (settings_layout=%s, pagination=%s)",
+            profile.name,
+            profile.settings_layout,
+            profile.supports_pagination,
         )
-        for uuid in notify_chars:
+
+        # 1. Time calibration (profile-specific format) – skipped with --no-calibrate
+        if calibrate:
+            if profile.uses_t1_calibration:
+                now = datetime.datetime.now().astimezone()
+                offset = now.utcoffset()
+                offset_min = int(offset.total_seconds() / 60) if offset is not None else 0
+                weekday = (now.weekday() + 1) % 7  # Python Mon=0..Sun=6 → Oclean Sun=0..Sat=6
+                payload = bytes(
+                    [
+                        now.year - 2000,
+                        now.month,
+                        now.day,
+                        now.hour,
+                        now.minute,
+                        now.second,
+                        weekday,
+                        oclean_tz_index(offset_min),
+                    ]
+                )
+                cal_cmd = CMD_CALIBRATE_TIME_T1_PREFIX + payload
+            else:
+                cal_cmd = CMD_CALIBRATE_TIME_PREFIX + struct.pack(">I", int(time.time()))
+            try:
+                await client.write_gatt_char(profile.write_char, cal_cmd, response=True)
+                _LOG.info("✓ Time calibration sent (%s)", cal_cmd.hex())
+            except Exception as e:
+                _LOG.warning("✗ Time calibration: %s", e)
+        else:
+            _LOG.info("· Time calibration skipped (--no-calibrate)")
+
+        # 2. Subscribe to the profile's notify characteristics
+        for uuid in profile.notify_chars:
             try:
                 await client.start_notify(uuid, notification_handler)
                 _LOG.info("✓ Subscribed  %s", uuid)
             except Exception as e:
                 _LOG.debug("✗ Not available: %s – %s", uuid[-8:], e)
 
-        # 3. CMD_QUERY_STATUS (0303)
-        try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, CMD_QUERY_STATUS, response=True)
-            _LOG.info("✓ CMD_QUERY_STATUS (0303) sent")
-        except Exception as e:
-            _LOG.warning("✗ CMD_QUERY_STATUS: %s", e)
+        # 3. Profile query commands (0303 / 030201 / 0307 …) – never 0202
+        for char_uuid, cmd in profile.query_commands:
+            try:
+                await client.write_gatt_char(char_uuid, cmd, response=True)
+                _LOG.info("✓ Command %s sent via %s", cmd.hex(), char_uuid[-8:])
+            except Exception as e:
+                _LOG.warning("✗ Command %s: %s", cmd.hex(), e)
 
-        # 4. CMD_DEVICE_INFO (0202)
-        try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, CMD_DEVICE_INFO, response=True)
-            _LOG.info("✓ CMD_DEVICE_INFO (0202) sent")
-        except Exception as e:
-            _LOG.warning("✗ CMD_DEVICE_INFO: %s", e)
-
-        # 5a. CMD_QUERY_RUNNING_DATA (0308) – Type 0 / extended format
-        try:
-            await client.write_gatt_char(WRITE_CHAR_UUID, CMD_QUERY_RUNNING_DATA, response=True)
-            _LOG.info("✓ CMD_QUERY_RUNNING_DATA (0308) sent")
-        except Exception as e:
-            _LOG.warning("✗ CMD_QUERY_RUNNING_DATA: %s", e)
-
-        # 5b. CMD_QUERY_RUNNING_DATA_T1 (0307) – Type 1 (Oclean X)
-        try:
-            await client.write_gatt_char(SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1, response=True)
-            _LOG.info("✓ CMD_QUERY_RUNNING_DATA_T1 (0307) sent")
-        except Exception as e:
-            _LOG.debug("✗ Type-1 running data skipped: %s", e)
+        # 3b. Optional: legacy Type-0 (0308) + explicit 0309 pagination
+        if max_pages > 0:
+            try:
+                await client.write_gatt_char(WRITE_CHAR_UUID, CMD_QUERY_RUNNING_DATA, response=True)
+                _LOG.info("✓ CMD_QUERY_RUNNING_DATA (0308) sent")
+            except Exception as e:
+                _LOG.debug("✗ 0308 skipped: %s", e)
 
         # 5c. Pagination via 0309
         if max_pages > 0:
@@ -292,7 +333,7 @@ async def single_poll(
                 _LOG.warning("✗ Brush head reset failed: %s", e)
 
         # 8. Unsubscribe
-        for uuid in notify_chars:
+        for uuid in profile.notify_chars:
             try:
                 await client.stop_notify(uuid)
             except Exception:
@@ -361,6 +402,7 @@ async def main(
     brushing_mode: bool,
     max_pages: int,
     reset_brush_head: bool,
+    calibrate: bool = True,
 ) -> None:
     if reset_brush_head:
         print()
@@ -376,6 +418,7 @@ async def main(
         brushing_mode=brushing_mode,
         max_pages=max_pages,
         reset_brush_head=reset_brush_head,
+        calibrate=calibrate,
     )
     print_sensor_state(data)
 
@@ -415,10 +458,20 @@ if __name__ == "__main__":
             "⚠️  This modifies device state – confirmation required."
         ),
     )
+    ap.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the 0201 time-calibration write. Use for a read-only diagnostic run "
+            "(the coordinator normally calibrates on every poll)."
+        ),
+    )
     args = ap.parse_args()
     asyncio.run(main(
         address=args.address,
         brushing_mode=args.brushing,
         max_pages=args.pages,
         reset_brush_head=args.reset_brush_head,
+        calibrate=not args.no_calibrate,
     ))

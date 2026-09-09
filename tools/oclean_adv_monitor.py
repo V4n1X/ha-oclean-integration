@@ -35,8 +35,7 @@ import asyncio
 import datetime
 import json
 import sys
-from dataclasses import dataclass, field, asdict
-from typing import Any
+from dataclasses import asdict, dataclass
 
 try:
     from bleak import BleakScanner

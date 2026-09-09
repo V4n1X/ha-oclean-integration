@@ -7,6 +7,7 @@ import pytest
 from custom_components.oclean_ble.const import (
     CHANGE_INFO_UUID,
     CMD_CLEAR_RUNNING_DATA,
+    CMD_QUERY_DEVICE_SETTINGS,
     CMD_QUERY_RUNNING_DATA,
     CMD_QUERY_RUNNING_DATA_T1,
     CMD_QUERY_STATUS,
@@ -133,8 +134,18 @@ class TestType1Profile:
         char, cmd = next(p for p in TYPE1.query_commands if p[1] == CMD_QUERY_RUNNING_DATA_T1)
         assert char == SEND_BRUSH_CMD_UUID
 
+    def test_status_and_settings_go_to_write_char(self):
+        """APK g/g.java:773/848 and g/w0.java:324/375 write 0303 + 030201 to fbb85.
+
+        Only 0307 uses fbb89 – sending other commands there is a deviation from the
+        official app and has hung Oclean firmware in the field.
+        """
+        for cmd in (CMD_QUERY_STATUS, CMD_QUERY_DEVICE_SETTINGS):
+            char = next(c for c, v in TYPE1.query_commands if v == cmd)
+            assert char == WRITE_CHAR_UUID
+
     def test_standalone_write_char_is_fbb85(self):
-        """APK C3376s.java: f12501k = fbb85 for all standalone writes (0206, 0201, 0209, 0217).
+        """APK g/e.java: f12501k = fbb85 for all standalone writes (0206, 0201, 020D, 0217).
         Only 0307 uses f12582C = fbb89. write_char must be WRITE_CHAR_UUID so brush
         scheme and other config commands reach the device."""
         assert TYPE1.write_char == WRITE_CHAR_UUID

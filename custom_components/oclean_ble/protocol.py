@@ -82,14 +82,16 @@ TYPE1 = DeviceProtocol(
     name="Type-1",
     notify_chars=(READ_NOTIFY_CHAR_UUID, RECEIVE_BRUSH_UUID),  # fbb89 write-only, subscribe always fails
     query_commands=(
-        (SEND_BRUSH_CMD_UUID, CMD_QUERY_STATUS),
-        (SEND_BRUSH_CMD_UUID, CMD_QUERY_DEVICE_SETTINGS),
+        (WRITE_CHAR_UUID, CMD_QUERY_STATUS),
+        (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS),
         (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1),
     ),
     supports_pagination=False,
-    # APK C3376s.java: all standalone writes (0201 calibration, 0206 brush scheme,
-    # 0209 area-remind, 0217 brush-head-max-days, …) use f12501k = fbb85.
-    # Only the 0307 query command uses f12582C = fbb89.
+    # APK-exact routing (g/g.java:773/848/825, g/w0.java:324/375/360, g/f.java:245/290/275):
+    # 0303 (status) and 030201 (settings) are written to f12501k = fbb85, and ONLY
+    # 0307 (running data) goes to f12582C = fbb89.  All standalone writes
+    # (0201 calibration, 0206 brush scheme, 020D area-remind, 0217 brush-head-max-days)
+    # use fbb85 as well.
     write_char=WRITE_CHAR_UUID,
     uses_t1_calibration=True,
 )
@@ -172,7 +174,6 @@ UNKNOWN = DeviceProtocol(
     ),
     supports_pagination=True,  # safe: pagination stops when no new sessions arrive
 )
-
 
 # ---------------------------------------------------------------------------
 # Model-ID → protocol lookup

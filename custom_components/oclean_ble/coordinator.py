@@ -81,6 +81,7 @@ from .const import (
     SCHEMES_BY_MODEL,
     STORAGE_VERSION,
     WRITE_CHAR_UUID,
+    oclean_tz_index,
 )
 from .models import OcleanDeviceData
 from .parser import (
@@ -335,48 +336,8 @@ _NOTIFY_CHARS: tuple[str, ...] = UNKNOWN.notify_chars
 # DIS re-read interval: 24 h in seconds. Info only changes after firmware updates.
 _DIS_REFRESH_INTERVAL = 86_400
 
-# Oclean GMT offset table (1-based, 33 entries) – from DateUtils.java / C3352g.java.
-# Used to map the local UTC offset to the tzIndex byte in the 0201 calibration command.
-_TZ_OFFSETS_MIN: tuple[int, ...] = (
-    -720,
-    -660,
-    -600,
-    -540,
-    -480,
-    -420,
-    -360,
-    -300,
-    -240,
-    -210,
-    -180,
-    -120,
-    -60,
-    0,
-    60,
-    120,
-    180,
-    210,
-    240,
-    270,
-    300,
-    330,
-    345,
-    360,
-    390,
-    420,
-    480,
-    540,
-    570,
-    600,
-    660,
-    720,
-    780,
-)
-
-
-def _oclean_tz_index(offset_minutes: int) -> int:
-    """Return the 1-based Oclean timezone index closest to *offset_minutes*."""
-    return min(range(len(_TZ_OFFSETS_MIN)), key=lambda i: abs(_TZ_OFFSETS_MIN[i] - offset_minutes)) + 1
+# The Oclean GMT offset table and the tzIndex helper live in const.py so that
+# the standalone diagnostic tools can use them without importing HA.
 
 
 class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
@@ -403,6 +364,9 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         )
         self._mac = mac_address
         self._device_name = device_name
+        # Config entry id is needed for the non-deprecated device-registry lookup
+        # (HA 2026.9: async_get_device_by_identifier(identifier, config_entry_id)).
+        self._config_entry_id: str | None = getattr(config_entry, "entry_id", None)
         # Carries raw dict across polls so sensors keep their last value on failure
         self._last_raw: dict[str, Any] = {}
         # Track whether the last poll succeeded
@@ -1436,19 +1400,18 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         if sw_version or model_id:
             try:
                 device_registry = dr.async_get(self.hass)
-                # HA 2026.9 deprecated `async_get_device(identifiers=…)` in favour of
-                # `async_get_device_id_by_identifier`; keep a fallback so the
-                # integration still runs on older cores (hacs.json minimum).
-                device_id: str | None = None
-                get_by_identifier = getattr(device_registry, "async_get_device_id_by_identifier", None)
-                if get_by_identifier is not None:
-                    device_id = get_by_identifier((DOMAIN, self._mac))
-                else:  # pragma: no cover – HA < 2026.9
+                # HA 2026.9 deprecated `async_get_device(identifiers=…)` (removed in
+                # 2027.8) in favour of `async_get_device_by_identifier`, which needs
+                # the owning config entry id.  Fall back for older cores / unit tests.
+                device_entry: Any = None
+                get_by_identifier = getattr(device_registry, "async_get_device_by_identifier", None)
+                if get_by_identifier is not None and self._config_entry_id:
+                    device_entry = get_by_identifier((DOMAIN, self._mac), self._config_entry_id)
+                else:  # pragma: no cover – HA < 2026.9 or no config entry
                     device_entry = device_registry.async_get_device(identifiers={(DOMAIN, self._mac)})
-                    device_id = device_entry.id if device_entry else None
-                if device_id:
+                if device_entry:
                     device_registry.async_update_device(
-                        device_id,
+                        device_entry.id,
                         sw_version=sw_version,
                         hw_version=hw_revision,
                         model=model_id,
@@ -1476,7 +1439,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
             now = datetime.datetime.now().astimezone()
             utc_offset = now.utcoffset()
             offset_min = int(utc_offset.total_seconds() / 60) if utc_offset is not None else 0
-            tz_idx = _oclean_tz_index(offset_min)
+            tz_idx = oclean_tz_index(offset_min)
             weekday = (now.weekday() + 1) % 7  # Python Mon=0..Sun=6 → Oclean Sun=0..Sat=6
             payload = bytes(
                 [
@@ -1520,18 +1483,17 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         detect devices (e.g. OCLEANA1) that don't support CCCD-based notifications
         on READ_NOTIFY_CHAR_UUID and must be polled via direct READ instead.
 
-        Strategy for stale CCCD state ("Notify acquired" / TimeoutError):
-          1. Proactively clear all CCCDs before the first subscribe attempt.
-          2. On failure: stop_notify + CCCD clear + retry.
-          3. On persistent failure: log actionable warning for the user.
-        """
-        # --- Proactive CCCD clear ---
-        # Some firmware (e.g. OCLEANY3 FW 1.0.0.23) retains stale CCCD state
-        # in device NVRAM across connections.  Pre-clearing before the first
-        # start_notify avoids the "Notify acquired" error in many cases.
-        for char_uuid in self._protocol.notify_chars:
-            await _clear_cccd(client, char_uuid)
+        Sequence: the official app's helper (APK ``g/e.java:W()``) only enables the
+        local notification, writes ENABLE_NOTIFICATION/INDICATION to the CCCD and
+        moves on.  It never pre-clears a descriptor, and Oclean firmware is known to
+        be fragile about unexpected GATT traffic (a hung brush has been observed),
+        so the happy path here is kept minimal and byte-identical to the app:
 
+          1. plain ``start_notify`` for every notify characteristic;
+          2. only on failure ("Notify acquired" / timeout) release the stale
+             subscription, write 0x0000 to the CCCD and retry once;
+          3. on persistent failure log an actionable warning for the user.
+        """
         subscribed: set[str] = set()
         for char_uuid in self._protocol.notify_chars:
             try:

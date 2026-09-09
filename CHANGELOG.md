@@ -9,6 +9,19 @@ full evidence trail is in [`docs/OCLEANY3S-AUDIT.md`](docs/OCLEANY3S-AUDIT.md).
 
 ### Fixes
 
+- **APK-exact command routing: `0303` and `030201` now go to `…bb85`, not `…bb89`.** ⚠️
+  The official app writes *every* command except `0307` to `f10134k` = `9d84b9a3-…bb85`
+  and only `0307` (running data) to `5f78df94-…bb89` — identically in every protocol
+  class (`g/w0.java:324`/`:375` vs `:360`, `g/g.java:773`/`:848` vs `:825`,
+  `g/f.java:245`/`:290` vs `:275`). The integration sent status and settings to
+  `…bb89`. Oclean firmware is fragile about unexpected GATT traffic — a live test
+  against a real OCLEANY3S froze the brush (no button response) while the integration
+  was deviating from the app's sequence; see `docs/OCLEANY3S-AUDIT.md` §2.11.
+- **No proactive CCCD clear.** The app's notify helper (`g/e.java:W()`) only enables
+  the local notification and writes ENABLE_NOTIFICATION/INDICATION once; it never
+  writes `0x0000` first. The unconditional descriptor clear is gone — it is now a
+  single retry step used only when `start_notify` fails with "Notify acquired" or a
+  timeout.
 - **Stop polling `0202` – it is `clearRunningDate`, not a device-info query.** ⚠️
   The APK implements `0x0202` as `r0(listener)` in *every* protocol handler
   (`g/w0.java:503-515`, `g/g.java:1011-1027`, …) and the public SDK facade exposes
@@ -70,9 +83,6 @@ full evidence trail is in [`docs/OCLEANY3S-AUDIT.md`](docs/OCLEANY3S-AUDIT.md).
 
 ### Documented but intentionally unchanged
 
-- The APK writes `0303`/`030201` to `…bb85` and only `0307` to `…bb89`
-  (`g/w0.java:324`/`:375` vs. `:360`); the integration sends all queries via `fbb89`,
-  which is empirically confirmed to work. Left as-is pending a hardware test.
 - `0239` (brushing reminder) and `0240` (auto power-off timer) do not exist in `g.w0`
   at all, so the corresponding switches are likely no-ops on OCLEANY3S. Kept for
   other models; a model-capability gate (`cc.a`) is a follow-up.

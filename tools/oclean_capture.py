@@ -41,8 +41,8 @@ import datetime
 import json
 import struct
 import sys
-from typing import Any
 import time
+from typing import Any
 
 try:
     from bleak import BleakClient, BleakScanner
@@ -64,7 +64,9 @@ RECEIVE_BRUSH_UUID    = "5f78df94-798c-46f5-990a-855b673fbb90"
 CHANGE_INFO_UUID      = "6c290d2e-1c03-aca1-ab48-a9b908bae79e"
 
 CMD_QUERY_STATUS          = bytes.fromhex("0303")
-CMD_DEVICE_INFO           = bytes.fromhex("0202")
+CMD_QUERY_DEVICE_SETTINGS = bytes.fromhex("030201")  # device settings (0302 response)
+# 0x0202 is clearRunningDate, NOT a query – never send it (see docs/OCLEANY3S-AUDIT.md)
+CMD_CLEAR_RUNNING_DATA    = bytes.fromhex("0202")
 CMD_QUERY_RUNNING_DATA    = bytes.fromhex("0308")    # Type-0 devices
 CMD_QUERY_RUNNING_DATA_T1 = bytes.fromhex("0307")    # Type-1 (Oclean X)
 CMD_QUERY_RUNNING_DATA_NEXT = bytes.fromhex("0309")  # Follow-up page
@@ -231,7 +233,7 @@ async def capture(
             return
 
     print(f"  Found: {device.name!r}  address={device.address}")
-    print(f"Connecting …")
+    print("Connecting …")
 
     # --- Capture storage ---
     captures: list[dict] = []
@@ -292,12 +294,14 @@ async def capture(
                 pass  # characteristic may not exist on this device model
         print(f"  Subscribed to: {', '.join(subscribed) if subscribed else '(none found)'}\n")
 
-        # 3. Query device info (triggers 0202 ACK)
-        await send(WRITE_CHAR_UUID, CMD_DEVICE_INFO, "CMD_DEVICE_INFO")
-        await asyncio.sleep(1)
-
-        # 4. Query status (triggers 0303 STATE → battery)
+        # 3. Query status (triggers 0303 STATE → battery)
+        #    NOTE: 0x0202 (clearRunningDate) is deliberately NOT sent – it tells the
+        #    brush that its running data has been consumed. See docs/OCLEANY3S-AUDIT.md.
         await send(WRITE_CHAR_UUID, CMD_QUERY_STATUS, "CMD_QUERY_STATUS")
+        await asyncio.sleep(2)
+
+        # 4. Query device settings (triggers the 0302 response)
+        await send(WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS, "CMD_QUERY_DEVICE_SETTINGS")
         await asyncio.sleep(2)
 
         # 5. Query running data – Type-0 (0308 extended, most Oclean models)

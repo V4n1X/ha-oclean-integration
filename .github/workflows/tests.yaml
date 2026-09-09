@@ -21,7 +21,7 @@ jobs:
       - name: Verify target Home Assistant version
         run: python -c "import homeassistant.const as c; assert c.__version__ == '2026.9.1', c.__version__; print('HA', c.__version__)"
       - name: Lint (ruff)
-        run: ruff check custom_components/ tests/
+        run: ruff check custom_components/ tests/ tools/
       - name: Type check (mypy)
         run: mypy custom_components/oclean_ble/ --ignore-missing-imports
       - name: Run tests

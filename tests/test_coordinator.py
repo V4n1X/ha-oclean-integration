@@ -2316,33 +2316,33 @@ class TestOcleanTzIndex:
     """Unit tests for the _oclean_tz_index() helper used by 0201 time calibration."""
 
     def test_utc(self):
-        from custom_components.oclean_ble.coordinator import _oclean_tz_index
+        from custom_components.oclean_ble.const import oclean_tz_index as _oclean_tz_index
 
         assert _oclean_tz_index(0) == 14  # GMT+00:00 is index 14
 
     def test_cet(self):
-        from custom_components.oclean_ble.coordinator import _oclean_tz_index
+        from custom_components.oclean_ble.const import oclean_tz_index as _oclean_tz_index
 
         assert _oclean_tz_index(60) == 15  # GMT+01:00
 
     def test_cest(self):
-        from custom_components.oclean_ble.coordinator import _oclean_tz_index
+        from custom_components.oclean_ble.const import oclean_tz_index as _oclean_tz_index
 
         assert _oclean_tz_index(120) == 16  # GMT+02:00
 
     def test_negative_offset(self):
-        from custom_components.oclean_ble.coordinator import _oclean_tz_index
+        from custom_components.oclean_ble.const import oclean_tz_index as _oclean_tz_index
 
         assert _oclean_tz_index(-300) == 8  # GMT-05:00
 
     def test_nearest_for_nonstandard_offset(self):
-        from custom_components.oclean_ble.coordinator import _oclean_tz_index
+        from custom_components.oclean_ble.const import oclean_tz_index as _oclean_tz_index
 
         # GMT+05:45 (Nepal) → index 23; offset = 5*60+45 = 345
         assert _oclean_tz_index(345) == 23
 
     def test_result_always_in_valid_range(self):
-        from custom_components.oclean_ble.coordinator import _oclean_tz_index
+        from custom_components.oclean_ble.const import oclean_tz_index as _oclean_tz_index
 
         for offset in range(-720, 780, 30):
             idx = _oclean_tz_index(offset)
