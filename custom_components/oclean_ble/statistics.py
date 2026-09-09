@@ -54,7 +54,7 @@ def _load_recorder_api():
     try:
         from homeassistant.components.recorder.models import StatisticMeanType
     except ImportError:
-        StatisticMeanType = None  # type: ignore[assignment,misc]
+        StatisticMeanType = None
     return StatisticData, StatisticMetaData, StatisticMeanType, async_add_external_statistics
 
 

@@ -61,3 +61,5 @@ oclean_ble.log*
 # Local issue tracking / scratch
 issues/
 scratch/
+# Local CI log downloads / scratch tooling
+_ci/

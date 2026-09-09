@@ -46,9 +46,10 @@ from .const import (
 )
 from .coordinator import OcleanCoordinator
 from .entity import OcleanEntity
+from .models import OcleanDeviceData
 
 
-def _get_areas(coordinator_data: dict | None) -> dict[str, int] | None:
+def _get_areas(coordinator_data: OcleanDeviceData | None) -> dict[str, int] | None:
     """Return the last_brush_areas dict, or None if unavailable or wrong type."""
     if coordinator_data is None:
         return None

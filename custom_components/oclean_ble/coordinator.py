@@ -397,10 +397,9 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(seconds=update_interval) if update_interval > 0 else None,
-            # HA recommends passing the config entry (used for the config-entry
-            # context when scheduling updates).  Optional so unit tests and older
-            # cores keep working.
-            **({"config_entry": config_entry} if config_entry is not None else {}),
+            # HA uses the config entry for the update context; optional so that
+            # unit tests (no entry) and older cores keep working.
+            config_entry=config_entry,
         )
         self._mac = mac_address
         self._device_name = device_name

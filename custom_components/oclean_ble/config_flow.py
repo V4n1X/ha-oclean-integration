@@ -74,7 +74,7 @@ def _windows_list_to_str(windows: list[tuple[str, str]]) -> str:
     return ", ".join(parts)
 
 
-class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
+class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Oclean."""
 
     VERSION = 1
@@ -119,7 +119,7 @@ class OcleanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignor
         return self.async_show_form(
             step_id="confirm",
             errors=errors,
-            description_placeholders={"name": self._name, "mac": self._mac},
+            description_placeholders={"name": self._name or "Oclean", "mac": self._mac or ""},
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_POLL_INTERVAL, default=DEFAULT_POLL_INTERVAL): selector.NumberSelector(
