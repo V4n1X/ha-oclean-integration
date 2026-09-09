@@ -1116,14 +1116,38 @@ def _handle_device_info_ack(payload: bytes) -> dict[str, Any]:
     return {}
 
 
+def _strip_info_frame(payload: bytes) -> bytes:
+    """Strip the APK's ``#``-length frame from an info response, if present.
+
+    Long responses are length-prefixed so the firmware can split them across
+    notifications.  The app's framer ``w/a.java:26-80`` requires
+
+        value[0] == '#'            (``bytesToAscii(value, 1) == "#"``)
+        value[1] == len(data) + 2  (``bytesToIntBe(value, 1, 2) - 2``)
+        data      = value[2:]
+
+    and reassembles continuation packets until ``len(data)`` bytes arrived.
+    Only the 0302 device-settings response uses it; 0303 (6-byte payload) is
+    sent raw — confirmed in ``g/w0.java:1207-1215`` (0303 read at offset 0/3)
+    versus ``:1219-1225`` (0302 fed through ``w.a.a()``).
+
+    Returns *payload* unchanged when no valid frame is present, so devices or
+    firmware that send the payload raw keep working.
+    """
+    if len(payload) >= 2 and payload[0] == 0x23 and payload[1] == len(payload):
+        return payload[2:]
+    return payload
+
+
 def _parse_device_settings_response(
     payload: bytes, settings_layout: str = SETTINGS_LAYOUT_GENERIC
 ) -> dict[str, Any]:
     """Parse a 0302 device-settings response payload (bytes after the 2-byte type marker).
 
     Sent by device in response to CMD_QUERY_DEVICE_SETTINGS (030201).  The payload
-    layout is model-family specific and is selected by ``settings_layout`` (see
-    const.py / protocol.py).
+    is ``#``-length-framed (see ``_strip_info_frame``) and its field layout is
+    model-family specific; ``settings_layout`` selects it (see const.py /
+    protocol.py).
 
     **SETTINGS_LAYOUT_W0** – APK ``g/w0.java:1219-1272`` (handler ``g.w0``, used by
     OCLEANY3 / OCLEANY3S / OCLEANY3M / … and the Air-1 family).  Verified field map:
@@ -1163,6 +1187,11 @@ def _parse_device_settings_response(
     )
     for i, b in enumerate(payload):
         _LOGGER.debug("  0302[%02d] = 0x%02X  (%3d)", i, b, b)
+
+    framed = _strip_info_frame(payload)
+    if framed is not payload:
+        _LOGGER.debug("Oclean 0302: stripped '#%02x' length frame", payload[1])
+        payload = framed
 
     result: dict[str, Any] = {}
     if len(payload) < 6:

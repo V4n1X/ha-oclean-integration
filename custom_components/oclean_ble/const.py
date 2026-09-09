@@ -117,6 +117,12 @@ BLE_NOTIFICATION_WAIT = 8
 BLE_ENRICHMENT_WAIT = 1.5
 # Wait before READ fallback poll for devices without CCCD (e.g. OCLEANA1).
 BLE_READ_FALLBACK_DELAY = 1.5
+# Per-command response wait and inter-command gap.  The APK queues commands on a
+# single thread, waits up to 5000 ms for the answer (Options.receiveTimeout) and
+# sleeps 100 ms after each one (g/e.java:139).  Oclean firmware is fragile, so
+# the poll loop paces itself the same way instead of firing all commands at once.
+CMD_RESPONSE_WAIT = 2.0
+CMD_GAP = 0.1
 # Per-page notification timeout used during 0309 session pagination.
 BLE_PAGINATION_TIMEOUT = 2.0
 # Timeout for the first start_notify() attempt.  Short so that a TimeoutError

@@ -9,6 +9,20 @@ full evidence trail is in [`docs/OCLEANY3S-AUDIT.md`](docs/OCLEANY3S-AUDIT.md).
 
 ### Fixes
 
+- **APK-exact BLE sequence (static protocol re-check).** A full command-by-command
+  comparison with the decompiled app (`docs/OCLEANY3S-BLE-SEQUENCE.md`) found three
+  more deviations from the official sequence, all of which are fixed:
+  - **Commands are paced like the app.** The app queues every command on a single
+    thread, waits up to 5 s for the device's answer and sleeps 100 ms before the
+    next one (`g/e.java:632-642`, `g/d.java:56-72`, `a0/e.java:139`). The
+    integration fired all query commands back to back; it now waits for a
+    notification (`CMD_RESPONSE_WAIT`) and adds the same 100 ms gap.
+  - **`0302` responses are `#`-length-framed.** The app's info framer
+    (`w/a.java:26-80`) expects `'#' + (len+2) + data`; it is only used for `0302`
+    (`g/w0.java:659`, `:1220`), while `0303` is parsed raw. The parser now strips
+    the frame when present and stays compatible with unframed payloads.
+  - **Notification subscriptions are enabled in the APK's order**: 2A19 → fbb86 →
+    fbb90 (`g/w0.java:81-85`).
 - **APK-exact command routing: `0303` and `030201` now go to `…bb85`, not `…bb89`.** ⚠️
   The official app writes *every* command except `0307` to `f10134k` = `9d84b9a3-…bb85`
   and only `0307` (running data) to `5f78df94-…bb89` — identically in every protocol

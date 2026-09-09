@@ -427,3 +427,17 @@ def _install_ha_stubs() -> None:
 
 
 _install_ha_stubs()
+
+
+# ---------------------------------------------------------------------------
+# Test-speed tuning
+# ---------------------------------------------------------------------------
+# The BLE simulators deliver their notification burst once per subscribe, while
+# a real device answers every query command.  The coordinator waits up to
+# CMD_RESPONSE_WAIT seconds for that answer, which would add ~2 s per command
+# to every poll test without testing anything.  Shorten it globally; the pacing
+# logic itself is covered explicitly in
+# tests/test_coordinator.py::TestSendQueryCommandsPacing.
+from custom_components.oclean_ble import coordinator as _coordinator_module  # noqa: E402
+
+_coordinator_module.CMD_RESPONSE_WAIT = 0.0

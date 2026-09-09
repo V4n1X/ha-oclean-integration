@@ -23,6 +23,8 @@ from __future__ import annotations
 import struct
 from unittest.mock import AsyncMock
 
+from custom_components.oclean_ble.const import BATTERY_CHAR_UUID
+
 # ---------------------------------------------------------------------------
 # Payload builder functions
 # Each function returns a complete BLE notification (prefix included).
@@ -433,9 +435,12 @@ class OcleanDeviceSimulator:
     def build_client(self) -> AsyncMock:
         """Build a BleakClient mock that fires the accumulated notifications.
 
-        All notifications are delivered synchronously on the **first**
-        ``start_notify`` call, which simulates the device's BLE notification
-        burst after the coordinator sends its query commands.
+        All notifications are delivered synchronously on the **first** data
+        ``start_notify`` call (the Oclean service characteristics fbb86/fbb90),
+        which simulates the device's BLE notification burst after the coordinator
+        sends its query commands.  The battery characteristic (0x2A19) is
+        subscribed first by the coordinator (APK order) but never carries the
+        session burst, so it does not trigger the replay.
         """
         notifications = list(self._notifications)
         battery = self._battery
@@ -461,6 +466,8 @@ class OcleanDeviceSimulator:
             if uuid in notify_errors:
                 err = notify_errors[uuid]
                 raise err() if isinstance(err, type) else err
+            if uuid.lower() == BATTERY_CHAR_UUID.lower():
+                return  # battery pushes are simulated via read_gatt_char only
             call_count[0] += 1
             if call_count[0] == 1:
                 for payload in notifications:

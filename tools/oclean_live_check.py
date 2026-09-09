@@ -86,6 +86,9 @@ class Session:
         self.expected = 0
         self.in_progress = False
         self.record_count = 0
+        # set on every notification so the command loop can pace itself like
+        # the app (wait for the answer before sending the next command)
+        self.answered = asyncio.Event()
 
     def _accept(self, parsed: dict[str, Any]) -> None:
         if not parsed:
@@ -107,6 +110,7 @@ class Session:
     def handle(self, _sender: Any, data: bytearray) -> None:
         raw = bytes(data)
         self.raw.append(raw.hex())
+        self.answered.set()
         if self.in_progress:
             self.buf.extend(raw)
             _LOGGER.debug("  *B# continuation +%d (%d/%d)", len(raw), len(self.buf), self.expected)
@@ -261,15 +265,26 @@ async def run(args: argparse.Namespace) -> int:
             _LOGGER.warning("could NOT subscribe: %s", uuid[-8:])
     report["subscribed"] = subscribed
 
-    # --- query commands (never 0202) ----------------------------------------
+    # --- query commands, paced exactly like the app --------------------------
+    # APK: single-thread queue, wait for the answer (receiveTimeout 5000 ms),
+    # then SystemClock.sleep(100) before the next command (g/e.java:139).
     sent: list[str] = []
     for char_uuid, cmd in profile.query_commands:
+        session.answered.clear()
         try:
             await client.write_gatt_char(char_uuid, cmd, response=True)
             sent.append(cmd.hex())
             _LOGGER.info("sent %s via %s", cmd.hex(), char_uuid[-8:])
         except Exception as exc:
             _LOGGER.warning("send %s failed: %s", cmd.hex(), exc)
+            continue
+        try:
+            await asyncio.wait_for(session.answered.wait(), timeout=args.command_wait)
+            _LOGGER.info("  answered")
+        except asyncio.TimeoutError:
+            _LOGGER.warning("  no answer within %.1fs – stopping the sequence", args.command_wait)
+            break
+        await asyncio.sleep(0.1)
     report["commands_sent"] = sent
 
     _LOGGER.info("collecting notifications for %ss ...", args.collect)
@@ -328,6 +343,12 @@ def main() -> int:
     ap.add_argument("--wait", type=float, default=120.0, help="seconds to wait for advertising (default 120)")
     ap.add_argument("--timeout", type=float, default=25.0, help="connection timeout")
     ap.add_argument("--collect", type=float, default=12.0, help="seconds to collect notifications")
+    ap.add_argument(
+        "--command-wait",
+        type=float,
+        default=5.0,
+        help="seconds to wait for each command's answer (APK receiveTimeout 5000 ms)",
+    )
     ap.add_argument("--no-calibrate", action="store_true", help="skip the 0201 time-calibration write")
     ap.add_argument("--no-unpair", action="store_true", help="do not remove a stale Windows bond first")
     ap.add_argument("--out", help="write a JSON report to this path (personal data!)")

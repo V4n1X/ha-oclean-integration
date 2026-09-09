@@ -37,6 +37,8 @@ async def run_poll(coordinator: OcleanCoordinator, client: AsyncMock) -> dict:
       - bluetooth.async_last_service_info → minimal service-info for coordinator MAC
       - establish_connection               → returns the provided client mock
       - asyncio.sleep                      → no-op (speeds up tests)
+      - CMD_RESPONSE_WAIT                  → 0 s (the simulator answers once per
+                                             subscribe, not once per command)
       - coordinator._paginate_sessions     → no-op (unit-tested separately)
       - import_new_sessions                → returns 0
     """
@@ -51,6 +53,7 @@ async def run_poll(coordinator: OcleanCoordinator, client: AsyncMock) -> dict:
             "custom_components.oclean_ble.coordinator.asyncio.sleep",
             new_callable=AsyncMock,
         ),
+        patch("custom_components.oclean_ble.coordinator.CMD_RESPONSE_WAIT", 0.0),
         patch.object(coordinator, "_paginate_sessions", new_callable=AsyncMock),
         patch(
             "custom_components.oclean_ble.coordinator.import_new_sessions",

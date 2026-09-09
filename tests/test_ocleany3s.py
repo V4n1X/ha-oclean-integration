@@ -243,6 +243,55 @@ class TestOcleanY3SSettingsLayout:
 
 
 # ===========================================================================
+# 3b. '#'-length frame on the 0302 response (APK w/a.java:26-80)
+# ===========================================================================
+
+
+class TestOcleanY3SInfoFrame:
+    """The 0302 response is length-framed: '#' + (len+2) + data."""
+
+    @staticmethod
+    def _framed(data: bytes) -> bytes:
+        return b"\x23" + bytes([len(data) + 2]) + data
+
+    def test_framed_payload_is_stripped(self):
+        data = _w0_settings_payload()
+        framed = bytes.fromhex("0302") + self._framed(data)
+        result = parse_notification(framed, SETTINGS_LAYOUT_W0)
+        assert result[DATA_BRUSH_MODE] == 5
+        assert result[DATA_BRUSH_HEAD_DAYS] == 23
+        assert result[DATA_BRUSH_HEAD_USAGE] == 33
+
+    def test_framed_and_raw_give_the_same_result(self):
+        data = _w0_settings_payload()
+        raw = parse_notification(bytes.fromhex("0302") + data, SETTINGS_LAYOUT_W0)
+        framed = parse_notification(bytes.fromhex("0302") + self._framed(data), SETTINGS_LAYOUT_W0)
+        assert raw == framed
+
+    def test_raw_payload_still_works(self):
+        """Firmware that sends the payload unframed must keep working."""
+        result = parse_notification(bytes.fromhex("0302") + _w0_settings_payload(), SETTINGS_LAYOUT_W0)
+        assert result[DATA_BRUSH_HEAD_DAYS] == 23
+
+    def test_bogus_frame_is_not_stripped(self):
+        """A payload whose first byte happens to be 0x23 but with a wrong length."""
+        data = bytearray(_w0_settings_payload())
+        data[0] = 0x23
+        result = parse_notification(bytes.fromhex("0302") + bytes(data), SETTINGS_LAYOUT_W0)
+        # not stripped → deviceTheme stays 0x23 (35) and the rest is unshifted
+        assert result[DATA_BRUSH_MODE] == 5
+
+    def test_strip_helper_roundtrip(self):
+        from custom_components.oclean_ble.parser import _strip_info_frame
+
+        data = _w0_settings_payload()
+        assert _strip_info_frame(self._framed(data)) == data
+        assert _strip_info_frame(data) == data
+        assert _strip_info_frame(b"") == b""
+        assert _strip_info_frame(b"\x23") == b"\x23"
+
+
+# ===========================================================================
 # 4. 42-byte *B# record parsing
 # ===========================================================================
 

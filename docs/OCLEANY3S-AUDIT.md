@@ -256,6 +256,23 @@ APK-Zuordnung, und pro Versuch genau ein Verbindungsaufbau. Das Skript
 **UNBELEGT:** welcher der drei Punkte den Hänger ausgelöst hat – das Gerät erholt
 sich erst wieder, danach kann mit der APK-treuen Sequenz erneut getestet werden.
 
+### 2.12 Statischer Protokoll-Nachaudit: drei weitere Abweichungen behoben
+
+Nach dem Firmware-Hänger wurde die **komplette** BLE-Sequenz Kommando für Kommando
+gegen die APK geprüft. Vollständige Tabelle:
+[`OCLEANY3S-BLE-SEQUENCE.md`](OCLEANY3S-BLE-SEQUENCE.md). Ergebnis – drei weitere
+Abweichungen, alle behoben:
+
+| Abweichung | APK-Beleg | jetzt |
+|---|---|---|
+| Kommandos ohne Taktung in einem Schwall gesendet | Die App reiht jedes Kommando in einen Single-Thread-Executor ein, wartet auf die Antwort (`receiveTimeout` = 5000 ms) und schläft danach 100 ms (`g/e.java:632-642`, `g/d.java:56-72`, `a0/e.java:139`) | `CMD_RESPONSE_WAIT` = 2,0 s + `CMD_GAP` = 100 ms nach jedem Kommando |
+| `0302`-Antwort ohne Rahmen geparst | Der Framer `w/a.java:26-80` verlangt `'#' + (len+2) + Daten`; er wird **nur** für `0302` benutzt (`g/w0.java:659`, `:1220`), `0303` dagegen roh (`:1207-1215`) | `_strip_info_frame()` entfernt den Rahmen, rohe Nutzlast bleibt kompatibel |
+| Abo-Reihenfolge 2A19 zuletzt | `g/w0.java:81-85`: Batterie → fbb86 → fbb90 | gleiche Reihenfolge |
+
+Damit sind jetzt auch die letzten bekannten Unterschiede im Normalbetrieb
+beseitigt; übrig bleiben nur **reaktive** Fallbacks (CCCD-Retry, Read-Fallback,
+Polling-Fallback), die im fehlerfreien Ablauf nicht greifen.
+
 ---
 
 ## 3. Befunde ohne Codeänderung (dokumentiert, bewusst nicht geändert)

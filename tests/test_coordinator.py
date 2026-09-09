@@ -9,6 +9,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.oclean_ble.const import (
+    BATTERY_CHAR_UUID,
     DATA_BATTERY,
     DATA_LAST_BRUSH_AREAS,
     DATA_LAST_BRUSH_DURATION,
@@ -351,6 +352,8 @@ class TestSessionEnrichment:
         call_count = [0]
 
         async def fake_start_notify(uuid, handler):
+            if uuid == BATTERY_CHAR_UUID:
+                return  # 0x2A19 is subscribed first (APK order) and carries no data
             call_count[0] += 1
             if call_count[0] == 1:
                 for payload in notification_payloads:
@@ -1084,6 +1087,69 @@ class TestSendQueryCommandsWriteFailures:
         await coord._send_query_commands(client, event)
         # At least the running-data writes were attempted
         assert client.write_gatt_char.call_count >= 2
+
+
+# ---------------------------------------------------------------------------
+# _send_query_commands – APK-style pacing (one response wait + 100 ms gap)
+# ---------------------------------------------------------------------------
+
+
+class TestSendQueryCommandsPacing:
+    """APK g/e.java:139 + g/d.java:72: wait for each answer, then sleep 100 ms."""
+
+    @pytest.mark.asyncio
+    async def test_waits_for_a_notification_after_each_command(self):
+        coord = _make_coordinator()
+        coord._store_loaded = True
+        client = _make_bleak_client()
+        notify_received = asyncio.Event()
+        notify_received.set()  # answer arrives immediately
+
+        with patch("custom_components.oclean_ble.coordinator.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            event = asyncio.Event()
+            event.set()
+            await coord._send_query_commands(client, event, notify_received=notify_received)
+
+        # one gap sleep per command
+        assert sleep.await_count == len(coord._protocol.query_commands)
+        # the event is consumed (cleared) before every command
+        assert notify_received.is_set() is False
+
+    @pytest.mark.asyncio
+    async def test_times_out_when_no_answer_arrives(self):
+        """A silent device must not block the poll: CMD_RESPONSE_WAIT bounds it."""
+        coord = _make_coordinator()
+        coord._store_loaded = True
+        client = _make_bleak_client()
+        notify_received = asyncio.Event()  # never set
+
+        with (
+            patch("custom_components.oclean_ble.coordinator.asyncio.sleep", new_callable=AsyncMock),
+            patch("custom_components.oclean_ble.coordinator.CMD_RESPONSE_WAIT", 0.01),
+        ):
+            event = asyncio.Event()
+            event.set()
+            # Must not hang: 3 commands x 10 ms
+            await asyncio.wait_for(
+                coord._send_query_commands(client, event, notify_received=notify_received),
+                timeout=2.0,
+            )
+
+        assert client.write_gatt_char.call_count == len(coord._protocol.query_commands)
+
+    @pytest.mark.asyncio
+    async def test_no_notify_event_still_sends_and_gaps(self):
+        """Without a notify event (fallback paths) the commands are still paced."""
+        coord = _make_coordinator()
+        coord._store_loaded = True
+        client = _make_bleak_client()
+
+        with patch("custom_components.oclean_ble.coordinator.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            event = asyncio.Event()
+            event.set()
+            await coord._send_query_commands(client, event)
+
+        assert sleep.await_count == len(coord._protocol.query_commands)
 
 
 # ---------------------------------------------------------------------------
@@ -2074,6 +2140,8 @@ class TestT1C3352gReassembly:
         call_count = [0]
 
         async def fake_start_notify(uuid, handler):
+            if uuid == BATTERY_CHAR_UUID:
+                return  # 0x2A19 is subscribed first (APK order) and carries no data
             call_count[0] += 1
             if call_count[0] == 1:
                 for payload in notification_payloads:
@@ -2179,6 +2247,8 @@ class TestT1C3352gReassembly:
             call_count = [0]
 
             async def fake_start_notify(uuid, handler, _pkts=packets, _count=call_count):
+                if uuid == BATTERY_CHAR_UUID:
+                    return  # 0x2A19 is subscribed first (APK order) and carries no data
                 _count[0] += 1
                 if _count[0] == 1:
                     for p in _pkts:
@@ -2226,6 +2296,8 @@ class TestT1StreamTruncationRobustness:
         call_count = [0]
 
         async def fake_start_notify(uuid, handler, _pkts=packets, _c=call_count):
+            if uuid == BATTERY_CHAR_UUID:
+                return  # 0x2A19 is subscribed first (APK order) and carries no data
             _c[0] += 1
             if _c[0] == 1:
                 for p in _pkts:

@@ -46,9 +46,11 @@ from .const import (
     CMD_CALIBRATE_TIME_PREFIX,
     CMD_CALIBRATE_TIME_T1_PREFIX,
     CMD_CLEAR_BRUSH_HEAD,
+    CMD_GAP,
     CMD_OVER_PRESSURE,
     CMD_QUERY_RUNNING_DATA_NEXT,
     CMD_REMIND_SWITCH,
+    CMD_RESPONSE_WAIT,
     CMD_RUNNING_SWITCH,
     CMD_SET_BRUSH_SCHEME,
     CMD_SET_BRUSH_SCHEME_CONT,
@@ -1011,9 +1013,14 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         all_sessions: list[dict[str, Any]] = []
         seen_ts: set[int] = set()
         session_received = asyncio.Event()
-        handler, flush_pending = self._make_notification_handler(collected, all_sessions, seen_ts, session_received)
+        notify_received = asyncio.Event()
+        handler, flush_pending = self._make_notification_handler(
+            collected, all_sessions, seen_ts, session_received, notify_received
+        )
 
-        await self._run_ble_queries(client, collected, all_sessions, session_received, handler, flush_pending)
+        await self._run_ble_queries(
+            client, collected, all_sessions, session_received, handler, flush_pending, notify_received
+        )
         self._finalize_sessions(collected, all_sessions)
         return all_sessions
 
@@ -1023,6 +1030,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         all_sessions: list[dict[str, Any]],
         seen_ts: set[int],
         session_received: asyncio.Event,
+        notify_received: asyncio.Event | None = None,
     ) -> tuple[Callable[[Any, bytearray], None], Callable[[], None]]:
         """Return a (handler, flush_pending) pair for BLE notification processing.
 
@@ -1101,6 +1109,8 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         def handler(_sender: Any, raw: bytearray) -> None:
             data = bytes(raw)
             _log.debug("notification raw: %s", data.hex())
+            if notify_received is not None:
+                notify_received.set()
 
             # --- Continuation packet for active *B# reassembly ---
             # While reassembly is active, every incoming packet is treated as
@@ -1189,24 +1199,27 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         session_received: asyncio.Event,
         handler: Callable[[Any, bytearray], None],
         flush_pending: Callable[[], None],
+        notify_received: asyncio.Event | None = None,
     ) -> None:
         """Execute the full GATT operation sequence for one poll.
 
-        Mirrors the Java SDK order (C3335a / C3340b1):
-          1. Time calibration  (020E + BE timestamp)   – mo5289B
-          2. DIS read / cache
-          3. Subscribe to notification characteristics
-          3b. Subscribe to 0x2A19 battery notifications (captures push before step 8)
-          4. Status + running-data query commands
-          5. READ fallback for devices without CCCD (e.g. OCLEANA1)
-          6. Session pagination (0309)
-          7. Enrichment wait if sessions were received
-          8. Battery read (skipped if notification already delivered the value)
+        Mirrors the Java SDK order (APK `a0/d.java:65-115` + `g/e.java`):
+          1. Connect → discover services → request MTU (APK `a0/d.java:99-103`)
+          2. Time calibration  (0201 + 8-byte datetime) – `g/w0.java:248`
+          3. DIS read / cache
+          4. Subscribe to notification characteristics (2A19, fbb86, fbb90)
+          5. Query commands (0303, 030201 via fbb85; 0307 via fbb89), paced
+          6. READ fallback for devices without CCCD (e.g. OCLEANA1)
+          7. Session pagination (0309, Type-0 only)
+          8. Enrichment wait if sessions were received
+          9. Battery read (skipped if a notification already delivered the value)
         """
         await self._calibrate_time(client)
         await self._read_device_info_service(client, collected)
-        subscribed = await self._subscribe_notifications(client, handler)
+        # APK g/w0.java:81-85 enables notifications in this order:
+        # battery (0x2A19) → READ_INFO (fbb86) → RECEIVE_BRUSH (fbb90).
         await self._subscribe_battery_notifications(client, collected)
+        subscribed = await self._subscribe_notifications(client, handler)
 
         # Determine if notification subscriptions for data characteristics failed.
         # When none of the protocol's notify chars could be subscribed (persistent
@@ -1216,10 +1229,12 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         notify_chars_ok = any(c in subscribed for c in self._protocol.notify_chars)
         self._last_subscribe_ok = notify_chars_ok
         if notify_chars_ok:
-            await self._send_query_commands(client, session_received)
+            await self._send_query_commands(client, session_received, notify_received=notify_received)
         else:
             self._log.debug("no data characteristics subscribed – using shortened wait + polling fallback")
-            await self._send_query_commands(client, session_received, notify_wait=BLE_NOTIFICATION_WAIT_NO_SUB)
+            await self._send_query_commands(
+                client, session_received, notify_wait=BLE_NOTIFICATION_WAIT_NO_SUB, notify_received=notify_received
+            )
 
         # If the session-wait timed out while a *B# stream was mid-flight (e.g.
         # slow ESPHome proxy), flush whatever complete records arrived so far.
@@ -1673,6 +1688,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         client: BleakClient,
         session_received: asyncio.Event,
         notify_wait: float | None = None,
+        notify_received: asyncio.Event | None = None,
     ) -> None:
         """Send query commands for the active device protocol; wait for first session.
 
@@ -1680,10 +1696,20 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         are sent for the connected device.  Failures are logged at DEBUG level
         since unexpected commands are simply ignored by the firmware.
 
+        Pacing (APK `g/e.java:632-642` + `g/d.java:29-72`): the app submits every
+        command to a single-thread executor and, because it passes
+        ``needResponse = true``, waits for the device's answer (receiveTimeout
+        = 5000 ms) before the next command is even written; each command also
+        ends with a 100 ms sleep.  The firmware is known to be fragile, so this
+        loop waits for a notification (or ``CMD_RESPONSE_WAIT``) after each
+        command instead of firing all of them back to back.
+
         *notify_wait* overrides the default notification timeout (used when
         subscriptions failed and a polling fallback will follow).
         """
         for char_uuid, cmd in self._protocol.query_commands:
+            if notify_received is not None:
+                notify_received.clear()
             try:
                 await asyncio.wait_for(
                     client.write_gatt_char(char_uuid, cmd, response=True),
@@ -1697,6 +1723,20 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                     err,
                     type(err).__name__,
                 )
+                continue
+
+            if notify_received is not None:
+                try:
+                    await asyncio.wait_for(notify_received.wait(), timeout=CMD_RESPONSE_WAIT)
+                    self._log.debug("command 0x%s answered", cmd.hex())
+                except asyncio.TimeoutError:
+                    self._log.debug(
+                        "command 0x%s produced no notification within %.1f s",
+                        cmd.hex(),
+                        CMD_RESPONSE_WAIT,
+                    )
+            # APK g/e.java:139 – SystemClock.sleep(100L) after each command.
+            await asyncio.sleep(CMD_GAP)
 
         wait = notify_wait if notify_wait is not None else float(BLE_NOTIFICATION_WAIT)
         # Wait for first session notification (or timeout if device has no records)
