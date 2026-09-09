@@ -27,4 +27,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The rate limit is applied per runner IP, so it can still hit an
+      # authenticated pull on a busy runner.  Retry with backoff instead of
+      # failing the whole validation.
+      - name: Pre-pull hassfest image
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if docker pull ghcr.io/home-assistant/hassfest; then
+              exit 0
+            fi
+            echo "pull attempt ${attempt} failed – retrying in 30 s"
+            sleep 30
+          done
+          echo "::error::could not pull ghcr.io/home-assistant/hassfest after 5 attempts"
+          exit 1
       - uses: home-assistant/actions/hassfest@master
