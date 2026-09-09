@@ -19,6 +19,7 @@ from bleak import BleakClient, BleakError
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import establish_connection
 from homeassistant.components import bluetooth
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.storage import Store
@@ -389,12 +390,17 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         update_interval: int,
         poll_windows: str = "",
         post_brush_cooldown_h: int = 0,
+        config_entry: ConfigEntry | None = None,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(seconds=update_interval) if update_interval > 0 else None,
+            # HA recommends passing the config entry (used for the config-entry
+            # context when scheduling updates).  Optional so unit tests and older
+            # cores keep working.
+            **({"config_entry": config_entry} if config_entry is not None else {}),
         )
         self._mac = mac_address
         self._device_name = device_name
@@ -1151,7 +1157,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                 return
 
             # --- Normal notification dispatch ---
-            parsed = parse_notification(data)
+            parsed = parse_notification(data, self._protocol.settings_layout)
             _log.debug("notification parsed: %s", parsed)
 
             # --- Check for *B# multi-packet header (0307 + *B# magic + count) ---
@@ -1431,10 +1437,19 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         if sw_version or model_id:
             try:
                 device_registry = dr.async_get(self.hass)
-                device_entry = device_registry.async_get_device(identifiers={(DOMAIN, self._mac)})
-                if device_entry:
+                # HA 2026.9 deprecated `async_get_device(identifiers=…)` in favour of
+                # `async_get_device_id_by_identifier`; keep a fallback so the
+                # integration still runs on older cores (hacs.json minimum).
+                device_id: str | None = None
+                get_by_identifier = getattr(device_registry, "async_get_device_id_by_identifier", None)
+                if get_by_identifier is not None:
+                    device_id = get_by_identifier((DOMAIN, self._mac))
+                else:  # pragma: no cover – HA < 2026.9
+                    device_entry = device_registry.async_get_device(identifiers={(DOMAIN, self._mac)})
+                    device_id = device_entry.id if device_entry else None
+                if device_id:
                     device_registry.async_update_device(
-                        device_entry.id,
+                        device_id,
                         sw_version=sw_version,
                         hw_version=hw_revision,
                         model=model_id,

@@ -6,18 +6,22 @@ import pytest
 
 from custom_components.oclean_ble.const import (
     CHANGE_INFO_UUID,
+    CMD_CLEAR_RUNNING_DATA,
     CMD_QUERY_RUNNING_DATA,
     CMD_QUERY_RUNNING_DATA_T1,
     CMD_QUERY_STATUS,
     READ_NOTIFY_CHAR_UUID,
     RECEIVE_BRUSH_UUID,
     SEND_BRUSH_CMD_UUID,
+    SETTINGS_LAYOUT_GENERIC,
+    SETTINGS_LAYOUT_W0,
     WRITE_CHAR_UUID,
 )
 from custom_components.oclean_ble.protocol import (
     LEGACY,
     TYPE0,
     TYPE1,
+    TYPE1_Y3,
     UNKNOWN,
     DeviceProtocol,
     is_known_model,
@@ -155,13 +159,13 @@ class TestLegacyProfile:
         assert LEGACY.notify_chars == (READ_NOTIFY_CHAR_UUID,)
 
     def test_sends_all_legacy_commands(self):
-        """LEGACY sends status, device info, settings, and 0307 session query.
+        """LEGACY sends status, settings, and 0307 session query.
 
         APK C3385w0_fallback (mode=0, S0 case=0) confirms OCLEANA1 uses
-        0307 via fbb89 for session data, same as TYPE1.
+        0307 via fbb89 for session data, same as TYPE1.  The 0202
+        clearRunningDate command is deliberately NOT polled (see protocol.py).
         """
         from custom_components.oclean_ble.const import (
-            CMD_DEVICE_INFO,
             CMD_QUERY_DEVICE_SETTINGS,
             CMD_QUERY_RUNNING_DATA_T1,
             SEND_BRUSH_CMD_UUID,
@@ -170,9 +174,37 @@ class TestLegacyProfile:
 
         chars_and_cmds = list(LEGACY.query_commands)
         assert (WRITE_CHAR_UUID, CMD_QUERY_STATUS) in chars_and_cmds
-        assert (WRITE_CHAR_UUID, CMD_DEVICE_INFO) in chars_and_cmds
         assert (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS) in chars_and_cmds
         assert (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1) in chars_and_cmds
+        assert all(cmd != CMD_CLEAR_RUNNING_DATA for _, cmd in chars_and_cmds)
+
+    def test_uses_w0_settings_layout(self):
+        """The Air-1 family is handled by APK g.w0 (mode 0) → same 0302 layout."""
+        assert LEGACY.settings_layout == SETTINGS_LAYOUT_W0
+
+
+# ===========================================================================
+# TYPE1_Y3 – g/w0 family (OCLEANY3/Y3S/Y3M/…)
+# ===========================================================================
+
+
+class TestType1Y3Profile:
+    def test_same_ble_stack_as_type1(self):
+        assert TYPE1_Y3.notify_chars == TYPE1.notify_chars
+        assert TYPE1_Y3.query_commands == TYPE1.query_commands
+        assert TYPE1_Y3.write_char == TYPE1.write_char
+        assert TYPE1_Y3.uses_t1_calibration is True
+        assert TYPE1_Y3.supports_pagination is False
+
+    def test_uses_w0_settings_layout(self):
+        assert TYPE1_Y3.settings_layout == SETTINGS_LAYOUT_W0
+
+    def test_type1_keeps_generic_layout(self):
+        """TYPE1 now only covers non-g.w0 families (Y3P/Y3PD/…) → generic 0302."""
+        assert TYPE1.settings_layout == SETTINGS_LAYOUT_GENERIC
+
+    def test_no_clear_running_data_in_poll(self):
+        assert all(cmd != CMD_CLEAR_RUNNING_DATA for _, cmd in TYPE1_Y3.query_commands)
 
 
 # ===========================================================================
@@ -215,9 +247,10 @@ class TestProtocolForModel:
     @pytest.mark.parametrize(
         ("model_id", "expected"),
         [
-            ("OCLEANY3M", TYPE1),  # Oclean X – confirmed
+            ("OCLEANY3M", TYPE1_Y3),  # Oclean X – g/w0 family
             ("OCLEANY3P", TYPE1),  # Oclean X Pro Elite – confirmed (issue #3)
-            ("OCLEANY3", TYPE1),  # Oclean X Pro – reclassified (issue #49)
+            ("OCLEANY3", TYPE1_Y3),  # Oclean X Pro – g/w0 family (issue #49)
+            ("OCLEANY3S", TYPE1_Y3),  # Oclean X Pro (S) – APK protocol 9
             ("OCLEANA1", LEGACY),  # Oclean Air 1 – confirmed (issue #7)
         ],
     )

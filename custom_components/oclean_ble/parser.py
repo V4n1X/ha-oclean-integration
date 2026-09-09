@@ -43,6 +43,8 @@ from .const import (
     RESP_STATE,
     RESP_UNKNOWN_4B00,
     RESP_UNKNOWN_5400,
+    SETTINGS_LAYOUT_GENERIC,
+    SETTINGS_LAYOUT_W0,
     TOOTH_AREA_NAMES,
 )
 
@@ -169,25 +171,35 @@ def _apply_m18f_metrics(
 ) -> None:
     """Populate the per-session metrics shared by all three TYPE1 *B# record parsers.
 
-    Same 42-byte m18f layout for OCLEANY3M / OCLEANY3 (C3385w0) and OCLEANY3P (C3352g):
-      * gestureCode  – 2-bit value at byte 30 (APK a.b.a(byte30, 2))
+    Same 42-byte m18f layout for OCLEANY3M / OCLEANY3 / OCLEANY3S (g.w0) and
+    OCLEANY3P (g.g), verified directly against the APK:
+
+      * gestureCode  – full byte 18 (APK ``g/w0.java:1078``/``:1087``:
+        ``.put("gestureCode", bytesToIntBe(18, 19))``).  It is *also* gestureArray[0].
+      * gestureArray – bytes 18-30, the APK's canonical 13-element form
+        (``g/w0.java:1034-1073``, the ``f10129f == false`` branch that this APK uses
+        because ``VALIDATE="false"``).  The 8 tooth zones the app's diagram consumes
+        are the LAST 8 elements (indices 5-12 = bytes 23-30) — see
+        ``com/google/firebase/b.java:1020-1034`` where ``strArr[i13 + 4 .. i13 + 11]``
+        with ``i13 = length > 12 ? 1 : 0`` selects exactly those elements.
       * pressureRatio – bytes 11-15, plus the derived pressureCode (APK a.b.m14b)
-      * gestureArray – bytes 23-30 (8 per-zone values, padded to 12)
       * powerArray   – 2-bit nibbles of bytes 30-32 (APK m13a / a.b.a)
       * tooth-area coverage – share-based over bytes 23-30: a zone counts when
         ``raw / sum * duration >= coverage_norm_threshold`` (the on-device formula;
         see const.py). Bytes 11-15 are pressure, NOT areas (issue #109).
     """
-    result[DATA_LAST_BRUSH_GESTURE_CODE] = (record[30] >> 2) & 0x3
+    result[DATA_LAST_BRUSH_GESTURE_CODE] = int(record[18])
     pressure_ratio = list(record[11:16])
     result[DATA_LAST_BRUSH_PRESSURE_RATIO] = pressure_ratio
     result[DATA_LAST_BRUSH_PRESSURE_CODE] = _pressure_code(pressure_ratio)
-    result[DATA_LAST_BRUSH_GESTURE_ARRAY] = list(record[23:31]) + [0, 0, 0, 0]
+    gesture_array = list(record[18:31])
+    result[DATA_LAST_BRUSH_GESTURE_ARRAY] = gesture_array
     result[DATA_LAST_BRUSH_POWER_ARRAY] = (
         _extract_nibbles(record[30]) + _extract_nibbles(record[31]) + _extract_nibbles(record[32])
     )
 
-    area_bytes = bytes(record[23:31])
+    # The 8 tooth zones are gestureArray indices 5-12 (APK b.z offset i13 + 4).
+    area_bytes = bytes(gesture_array[5:13])
     share = coverage_norm_threshold / duration_s if duration_s > 0 else None
     area_dict, _zones_cleaned, _avg, coverage_pct = _build_area_stats(area_bytes, share_threshold=share)
     if any(v > 0 for v in area_bytes):
@@ -220,16 +232,23 @@ def _device_datetime(
     return datetime.datetime(year, month, day, hour, minute, second)
 
 
-def parse_notification(data: bytes) -> dict[str, Any]:
+def parse_notification(data: bytes, settings_layout: str = SETTINGS_LAYOUT_GENERIC) -> dict[str, Any]:
     """Parse a BLE notification from the Oclean device.
 
     Dispatches to the appropriate handler via the ``_PARSERS`` registry
     (Strategy pattern). Unknown data is logged as hex for empirical
     analysis during testing.
+
+    ``settings_layout`` selects the 0302 device-settings payload layout for the
+    active device family (see ``DeviceProtocol.settings_layout``); it is ignored
+    by every other response type.
     """
     if len(data) < 2:
         _LOGGER.debug("Oclean notification too short: %s", data.hex())
         return {}
+
+    if data[:2] == RESP_DEVICE_SETTINGS:
+        return _parse_device_settings_response(data[2:], settings_layout)
 
     handler = _PARSERS.get(data[:2])
     if handler is not None:
@@ -532,11 +551,10 @@ def parse_t1_c3385w0_record(
       bytes 11-15: pressureRatio[0..4] (5 pressure buckets) ✓ NOT tooth-zone areas
       byte 16:   discarded by APK (not an area byte)       ✓ APK L1620 result not assigned
       byte 17:   timezone index → getTimeZoneString()      ✓ APK L1638+L1812 (not stored)
-      bytes 23-30: gestureArray[0..7] (8 per-zone values)   ✓ APK m18f = getTime12()
-                   the per-zone tooth-area source (raw values; see coverage note)
-      byte 30:   gestureCode (2-bit value at a.b.a(·, 2))  ✓ APK-confirmed
-                 + powerArray nibbles a.b.a(·, 0/1/3)
-      bytes 31-32: powerArray nibble source                ✓ APK-confirmed
+      byte 18:   gestureCode (= gestureArray[0])           ✓ APK g/w0.java:1078/:1087
+      bytes 18-30: gestureArray[0..12] (13 values)         ✓ APK g/w0.java:1034-1073
+                   tooth zones = indices 5-12 = bytes 23-30 (APK b.z, i13+4)
+      bytes 30-32: powerArray nibble source                ✓ APK-confirmed
       byte 33:   score (0-100, 0xFF = absent)              ✓
       byte 34:   point (not used as sensor)                ✓ APK-confirmed
       bytes 35-41: reserved                                ?
@@ -544,7 +562,7 @@ def parse_t1_c3385w0_record(
     Identical layout to ``parse_t1_c3352g_record``. Earlier versions wrongly read
     the tooth-area coverage from bytes 11-15 (pressureRatio), which made a
     perfectly-scored session look unbalanced (issue #109). The real per-zone
-    coverage is the 8-value gestureArray at bytes 23-30.
+    coverage is the 8-value tail of the gestureArray at bytes 23-30.
 
     All out-of-range values are silently omitted from the result.
     """
@@ -632,9 +650,8 @@ def parse_t1_c3352g_record(
       bytes 11-15: pressureRatio[0..4]          ✓ (5 pressure-bucket counts)
       byte 16:   unused                         ✓
       byte 17:   timezone index                 ✓ (discarded)
-      bytes 18-22: reserved
-      bytes 23-30: gestureArray[0..7]           ✓ (8 values, padded to 12)
-      byte 30:   also contains gestureCode      ✓ (2-bit at position 2)
+      byte 18:   gestureCode (= gestureArray[0]) ✓ APK g/w0.java:1078/:1087
+      bytes 18-30: gestureArray[0..12]          ✓ (tooth zones = indices 5-12 = bytes 23-30)
       bytes 30-32: powerArray nibble source     ✓ (2-bit values via m13a)
       byte 33:   score (0-100, 0xFF = absent)   ✓
       byte 34:   point (not used)               ✓
@@ -1099,34 +1116,51 @@ def _handle_device_info_ack(payload: bytes) -> dict[str, Any]:
     return {}
 
 
-def _parse_device_settings_response(payload: bytes) -> dict[str, Any]:
-    """Parse 0302 device-settings response payload (bytes after the 2-byte type marker).
+def _parse_device_settings_response(
+    payload: bytes, settings_layout: str = SETTINGS_LAYOUT_GENERIC
+) -> dict[str, Any]:
+    """Parse a 0302 device-settings response payload (bytes after the 2-byte type marker).
 
-    Sent by device in response to CMD_QUERY_DEVICE_SETTINGS (030201).
-    Byte layout (source: APK C3367n0.java / C3385w0_fallback.java):
-      byte 0: batteryLevel (also available from 0303; redundant)
-      byte 1: networkStatus (bool)
-      byte 2: raiseWake (bool)
-      byte 3: voiceMainSwitch (bool)
-      byte 4: bindState (bool)
-      byte 5: modeNum – active brushing mode number (device-family-specific)
-      byte 6: brushSongSwitch (bool)
-      byte 7: unknown
-      byte 8: overCross (bool)
-      bytes 9-10: unknown (2-byte value)
-      byte 11: deviceTheme
-      bytes 12-15: unknown
-      byte 16: year (+ 2000) – device clock
-      bytes 17-21: month/day/hour/minute/second
-      byte 22: unknown
-      byte 23: areaRemind (bool)
-      byte 24: timezone offset
-      bytes 25-27: headMaxTimeLong (2-byte BE; unit TBD)
-      bytes 27-29: headUsedTimeLong (2-byte BE; unit TBD)
-      bytes 29-31: headUsedDays (2-byte BE; calendar days since brush-head reset)
-      byte 31: headUsedTimes (session count since brush-head reset) / deviceLanguage
+    Sent by device in response to CMD_QUERY_DEVICE_SETTINGS (030201).  The payload
+    layout is model-family specific and is selected by ``settings_layout`` (see
+    const.py / protocol.py).
+
+    **SETTINGS_LAYOUT_W0** – APK ``g/w0.java:1219-1272`` (handler ``g.w0``, used by
+    OCLEANY3 / OCLEANY3S / OCLEANY3M / … and the Air-1 family).  Verified field map:
+      byte 0:      deviceTheme            (NOT battery)
+      bytes 4-7:   voice-type word (isBaseVoice / isBaseVoiceNoise / isBaseVoiceLanguage)
+      byte 8:      volumeSwitch (0 = on)
+      byte 9:      volume index
+      byte 10:     calendarSwitch (0 = on)
+      byte 11:     pNum (brush scheme)
+      byte 12:     brushMode (!= 0xEC means "a mode is active")
+      byte 13:     splashPrevent
+      byte 14:     unused
+      byte 15:     headUsedTimeLong (1 byte)
+      byte 16:     device clock year (+2000), bytes 17-22 month/day/hour/min/sec
+      byte 23:     overPressure
+      byte 24:     areaRemind
+      byte 25:     timezone index
+      bytes 25-26: headMaxTimeLong
+      bytes 27-28: headUsedDays
+      bytes 29-30: headUsedTimes
+      byte 31:     deviceLanguage
+    There is **no battery value** in this layout – battery comes from 0303 byte 3 or
+    the 0x2A19 characteristic.
+
+    **SETTINGS_LAYOUT_GENERIC** – the historical layout used by other families
+    (``g/n0``, ``g/s``, ``g/u0``, ``g/b0``, ``g/x0``, ``g.g``):
+      byte 0: batteryLevel (redundant with 0303/0x2A19, kept as a fallback)
+      byte 5: modeNum
+      bytes 25-26: headMaxTimeLong, 27-28: headUsedTimeLong,
+      bytes 29-31: headUsedDays (2 B) / headUsedTimes (1 B)
     """
-    _LOGGER.debug("Oclean 0302 device-settings raw: %s  len=%d", payload.hex(), len(payload))
+    _LOGGER.debug(
+        "Oclean 0302 device-settings raw (layout=%s): %s  len=%d",
+        settings_layout,
+        payload.hex(),
+        len(payload),
+    )
     for i, b in enumerate(payload):
         _LOGGER.debug("  0302[%02d] = 0x%02X  (%3d)", i, b, b)
 
@@ -1135,9 +1169,37 @@ def _parse_device_settings_response(payload: bytes) -> dict[str, Any]:
         _LOGGER.debug("Oclean device-settings response too short (%d < 6)", len(payload))
         return result
 
-    # byte 0: batteryLevel (APK: C3385w0_fallback, also confirmed for OCLEANA1)
-    # Redundant with 0303 byte 3 and 0x2A19, but serves as a reliable fallback
-    # when the other sources fail (e.g. OCLEANA1 battery freeze issue #7).
+    if settings_layout == SETTINGS_LAYOUT_W0:
+        result[DATA_BRUSH_MODE] = int(payload[12]) if len(payload) > 12 else 0
+        if len(payload) >= 32:
+            head_max = int.from_bytes(payload[25:27], "big")
+            head_used_time = int(payload[15])
+            head_days = int.from_bytes(payload[27:29], "big")
+            head_times = int.from_bytes(payload[29:31], "big")
+            _LOGGER.debug(
+                "Oclean 0302 (g.w0) settings –"
+                " deviceTheme=%d pNum=%d brushMode=%d overPressure=%d areaRemind=%d"
+                " headMaxTimeLong=%d (0x%04x, unit TBD) headUsedTimeLong=%d"
+                " headUsedDays=%d headUsedTimes=%d deviceLanguage=%d",
+                payload[0],
+                payload[11],
+                payload[12],
+                payload[23],
+                payload[24],
+                head_max,
+                head_max,
+                head_used_time,
+                head_days,
+                head_times,
+                payload[31],
+            )
+            result[DATA_BRUSH_HEAD_USAGE] = head_times
+            result[DATA_BRUSH_HEAD_DAYS] = head_days
+        _LOGGER.debug("Oclean device-settings parsed (g.w0): %s", result)
+        return result
+
+    # byte 0: batteryLevel (also available from 0303; redundant)
+    # Serves as a reliable fallback when the other sources fail (OCLEANA1 issue #7).
     batt = int(payload[0])
     if 0 <= batt <= 100:
         result[DATA_BATTERY] = batt
@@ -1489,6 +1551,9 @@ def _parse_session_meta_y3p_response(payload: bytes) -> dict[str, Any]:
 # To add support for a new notification type, add one entry here.
 _PARSERS: dict[bytes, Callable[[bytes], dict[str, Any]]] = {
     RESP_STATE: _parse_state_response,
+    # NOTE: parse_notification() handles RESP_DEVICE_SETTINGS explicitly so that it
+    # can pass the model-specific `settings_layout`; the entry here is only a
+    # fallback for direct registry users and uses the generic layout.
     RESP_DEVICE_SETTINGS: _parse_device_settings_response,
     RESP_INFO: _parse_info_response,
     RESP_INFO_T1: _parse_info_t1_response,

@@ -136,10 +136,19 @@ grep -c "DIS read" oclean_ble.log
 
 ### Device protocol mapping (confirmed via APK + empirical logs)
 
+> **OCLEANY3S audit (2026-09-09):** the whole `g.w0` family — `OCLEANY3`,
+> `OCLEANY3S`, `OCLEANY3T`, `OCLEANY3M*`, `OCLEANY3N`, `OCLEANY3D*`, `OCLEANR3L`
+> and the Air-1 family — now uses the dedicated `TYPE1_Y3` profile with
+> `settings_layout = SETTINGS_LAYOUT_W0`. `OCLEANY3P`/`OCLEANY3PB`/`OCLEANY3PD`
+> stay on `TYPE1` (`g.g` mode 0). `0x0202` is **not** a query: it is
+> `clearRunningDate` and must never be polled. Full evidence:
+> [`docs/OCLEANY3S-AUDIT.md`](docs/OCLEANY3S-AUDIT.md).
+
 | Device | Model-ID | Protocol | All commands via | Session response | Extended fields |
 |--------|----------|----------|-----------------|-----------------|-----------------|
-| Oclean X | OCLEANY3M | TYPE1 | fbb89 (SEND_BRUSH_CMD_UUID) | fbb90 (RECEIVE_BRUSH_UUID) | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). `0000`/`2604` enrichment pushes may additionally arrive. |
-| Oclean X Pro | OCLEANY3 | TYPE1 | fbb89 | fbb90 | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). Same `parse_t1_c3385w0_record` path as OCLEANY3M. |
+| Oclean X | OCLEANY3M | TYPE1_Y3 | fbb89 (SEND_BRUSH_CMD_UUID) | fbb90 (RECEIVE_BRUSH_UUID) | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). `0000`/`2604` enrichment pushes may additionally arrive. |
+| Oclean X Pro | OCLEANY3 | TYPE1_Y3 | fbb89 | fbb90 | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). Same `parse_t1_c3385w0_record` path as OCLEANY3M. |
+| Oclean X Pro (S) | OCLEANY3S | TYPE1_Y3 | fbb89 | fbb90 | Same as OCLEANY3M (APK `g.w0` mode 1, protocol ID 9). 0302 uses the `g/w0` layout; coverage threshold 9.0. |
 | Oclean X Pro Elite | OCLEANY3P | TYPE1 | fbb89 | fbb90 | Score + areas **inline** in the 42-byte `*B#` record (areas = gestureArray bytes 23-30). NOT via `021f`/`5100`/`2604` pushes. |
 | Oclean Air 1 | OCLEANA1 | LEGACY | fbb85 (WRITE_CHAR_UUID) | fbb86 READ (no CCCD) | None |
 

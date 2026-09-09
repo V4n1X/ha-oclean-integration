@@ -1742,25 +1742,35 @@ class TestParseT1C3352gRecord:
         record[1] = 0  # month=0 is invalid for datetime
         assert parse_t1_c3352g_record(bytes(record)) == {}
 
-    def test_gesture_code_from_byte30_bits(self):
-        """gestureCode is a 2-bit value from byte 30 position 2 (APK: a.b.a(byte30, 2))."""
+    def test_gesture_code_from_byte18(self):
+        """gestureCode is the full record byte 18 (APK g/w0.java:1078/:1087)."""
         record = bytearray(_make_c3352g_record())
-        # gestureCode = bits 3-2 of byte 30: value 2 → byte 30 = 0b0000_10_00 = 0x08
-        record[30] = 0x08
+        record[18] = 0x2A
         result = parse_t1_c3352g_record(bytes(record))
-        assert result["last_brush_gesture_code"] == 2
-        # value 3 → byte 30 = 0b0000_11_00 = 0x0C
-        record[30] = 0x0C
+        assert result["last_brush_gesture_code"] == 42
+        record[18] = 0xFF
         result = parse_t1_c3352g_record(bytes(record))
-        assert result["last_brush_gesture_code"] == 3
+        assert result["last_brush_gesture_code"] == 255
 
-    def test_gesture_array_8_elements_from_byte23(self):
-        """gestureArray is 8 bytes (23-30) padded to 12 (APK: m18f bytes 23-30)."""
+    def test_gesture_array_13_elements_from_byte18(self):
+        """gestureArray is the APK's 13-element form: record bytes 18-30."""
         record = bytearray(_make_c3352g_record())
-        for i in range(8):
-            record[23 + i] = i + 1
+        for i in range(13):
+            record[18 + i] = i + 1
         result = parse_t1_c3352g_record(bytes(record))
-        assert result["last_brush_gesture_array"] == [1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0]
+        assert result["last_brush_gesture_array"] == list(range(1, 14))
+
+    def test_tooth_zones_are_gesture_array_tail(self):
+        """The 8 tooth zones are gestureArray indices 5-12 (= record bytes 23-30).
+
+        APK com/google/firebase/b.java:1020-1034 reads strArr[i13 + 4 .. i13 + 11]
+        with i13 = length > 12 ? 1 : 0.
+        """
+        record = bytearray(_make_c3352g_record())
+        for i in range(13):
+            record[18 + i] = i + 1
+        result = parse_t1_c3352g_record(bytes(record))
+        assert list(result["last_brush_areas"].values()) == [6, 7, 8, 9, 10, 11, 12, 13]
 
     def test_pressure_ratio_from_bytes11_to_15(self):
         """pressureRatio comes from bytes 11-15 (confirmed APK)."""
@@ -1792,8 +1802,9 @@ class TestParseT1C3352gRecord:
           pNum = 76                  (byte 6 = 0x4c)
           duration = 150 s           (bytes 7-8 = 0x0096)
           score = 98                 (byte 33 = 0x62)
+          gestureCode = 0             (byte 18 = 0x00)
           pressureRatio = [0,1,4,30,0]  (bytes 11-15)
-          areas = bytes 23-30 = [5,14,15,13,8,15,12,14] (gestureArray, plausible)
+          areas = bytes 23-30 = [5,14,15,13,8,15,12,14] (gestureArray tail)
         """
         raw = bytes.fromhex("1a03161722234c009600960001041e00000f00141f171a050e0f0d080f0c0e00006200ffffffffffffff")
         assert len(raw) == 42
@@ -1801,7 +1812,9 @@ class TestParseT1C3352gRecord:
         assert result["last_brush_score"] == 98
         assert result["last_brush_duration"] == 150
         assert result["last_brush_pnum"] == 76
-        assert result["last_brush_gesture_code"] == 3  # byte 30 = 0x0e, bits 3-2 = 3
+        assert result["last_brush_gesture_code"] == 0  # byte 18 = 0x00
+        # gestureArray = record bytes 18-30 (13 values, APK g/w0 layout)
+        assert result["last_brush_gesture_array"] == [0, 20, 31, 23, 26, 5, 14, 15, 13, 8, 15, 12, 14]
         assert result["last_brush_pressure_ratio"] == [0, 1, 4, 30, 0]
         assert result["last_brush_areas"] == {
             "upper_left_out": 5,
@@ -1945,10 +1958,12 @@ class TestParseT1C3385w0Record:
         result = parse_t1_c3385w0_record(record)
         assert result["last_brush_pressure_code"] == expected_code
 
-    def test_gesture_array_8_elements_from_byte23(self):
+    def test_gesture_array_13_elements_from_byte18(self):
         record = _make_c3385w0_record(zone_times=(1, 2, 3, 4, 5, 6, 7, 8))
         result = parse_t1_c3385w0_record(record)
-        assert result["last_brush_gesture_array"] == [1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0]
+        assert result["last_brush_gesture_array"] == [0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]
+        # zones live in the tail of the array (indices 5-12)
+        assert list(result["last_brush_areas"].values()) == [1, 2, 3, 4, 5, 6, 7, 8]
 
     def test_coverage_is_share_based_not_raw_threshold(self):
         """Coverage uses each zone's SHARE of the total (APK m3804z structure),

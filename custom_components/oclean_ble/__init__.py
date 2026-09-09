@@ -136,6 +136,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         poll_interval,
         poll_windows=poll_windows,
         post_brush_cooldown_h=post_brush_cooldown_h,
+        config_entry=entry,
     )
 
     # Register coordinator and set up platforms *before* the first poll so that

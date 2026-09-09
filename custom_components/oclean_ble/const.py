@@ -29,7 +29,16 @@ CHANGE_INFO_UUID = "6c290d2e-1c03-aca1-ab48-a9b908bae79e"  # Notify (Type 0 only
 # BLE Commands (hex bytes)
 # Source: C3335a.java / C3340b1.java
 CMD_QUERY_STATUS = bytes.fromhex("0303")  # mo5295Q0 – all types
-CMD_DEVICE_INFO = bytes.fromhex("0202")  # mo5310r0 – all types
+# 0x0202 is NOT a device-info query.  APK: every protocol handler implements it as
+# `r0(listener)` (`g/w0.java:503-515`, `g/g.java:1011-1027`, `g/s.java:487`, …) and the
+# public SDK facade exposes exactly that method as `clearRunningDate(mac, listener)`
+# (`com/ocleanble/lib/OcleanBleManager.java:677-698`).  The app calls it only *after* a
+# successful session upload (`OcleanDataService.java:663-664`, `:704`), i.e. it tells the
+# brush that the running data has been consumed.  Sending it on every poll is therefore
+# wrong (and potentially destructive for unsynced sessions), so it was removed from all
+# `DeviceProtocol.query_commands`.  The device still answers "OK"; that reply is routed
+# by RESP_DEVICE_INFO below.
+CMD_CLEAR_RUNNING_DATA = bytes.fromhex("0202")  # r0 – clearRunningDate, do NOT poll
 CMD_CALIBRATE_TIME_PREFIX = bytes.fromhex("020E")  # mo5289B Type 0: + 4-byte BE unix timestamp
 CMD_CALIBRATE_TIME_T1_PREFIX = bytes.fromhex("0201")  # mo5292L Type 1 (C3352g): + 8-byte datetime payload
 CMD_QUERY_RUNNING_DATA = bytes.fromhex("0308")  # mo5299S0 Type 0 / C3340b1 – fetch brush records
@@ -148,6 +157,21 @@ CMD_RUNNING_SWITCH = bytes.fromhex("0240")  # + 0x01 (on) / 0x00 (off)
 # Brush head max lifetime command (mo5345x, OcleanBleManager.setRunningHeadMaxTime)
 CMD_BRUSH_HEAD_MAX_DAYS = bytes.fromhex("0217")  # + 2-byte big-endian uint16 (days)
 
+# 0302 ("device settings") response layouts.  The payload layout is model-family
+# specific; the APK parses it in one place per protocol class.
+#
+#   SETTINGS_LAYOUT_W0 – APK `g/w0.java:1219-1272` (handler `g.w0`, modes 0 AND 1).
+#       Covers OCLEANY3/Y3S/Y3T/Y3M/Y3MT/Y3N/Y3MN/Y3MTN/Y3MD/Y3D/Y3D1/Y3D2/R3L
+#       (protocol IDs 8,9,10,14,25,26,27,28,30,32,33,43,38) and the OCLEANA1 family.
+#       There is NO battery byte and NO modeNum byte in this layout – byte 0 is
+#       `deviceTheme` and byte 5 is part of the voice-type word.
+#   SETTINGS_LAYOUT_GENERIC – the layout previously assumed for every device
+#       (battery @0, modeNum @5, head counters @25-31).  The APK uses that shape for
+#       other families (`g/n0`, `g/s`, `g/u0`, `g/b0`, `g/x0`, `g.g`), so it is kept
+#       as the default for every profile that is not explicitly `g.w0`.
+SETTINGS_LAYOUT_W0 = "w0"
+SETTINGS_LAYOUT_GENERIC = "generic"
+
 # Coordinator data keys (additional)
 DATA_BRUSH_HEAD_USAGE = "brush_head_usage"
 DATA_BRUSH_HEAD_DAYS = "brush_head_days"
@@ -157,12 +181,15 @@ DATA_SW_VERSION = "sw_version"  # Software Revision from BLE DIS (e.g. "1.0.0.20
 DATA_LAST_BRUSH_AREAS = "last_brush_areas"  # dict: zone_name → pressure (0-255)
 DATA_LAST_BRUSH_COVERAGE = "last_brush_coverage"  # int 0-100: percentage of zones adequately cleaned
 DATA_LAST_BRUSH_PNUM = "last_brush_pnum"  # int (brush-scheme ID; see SCHEME_NAMES below)
-DATA_LAST_BRUSH_GESTURE_CODE = "last_brush_gesture_code"  # int 0-255 (APK: byte 14)
+DATA_LAST_BRUSH_GESTURE_CODE = "last_brush_gesture_code"  # int 0-255 (APK g/w0: record byte 18)
 DATA_LAST_BRUSH_PRESSURE_RATIO = "last_brush_pressure_ratio"  # list[int] len=5 (bytes 11-15)
 DATA_LAST_BRUSH_PRESSURE_CODE = "last_brush_pressure_code"  # int 0/50/60/70/80/90 (APK a.b.m14b over pressureRatio)
+# APK gestureArray in its canonical 13-element form (record bytes 18-30). The 8 tooth
+# zones used by the app's diagram are the LAST 8 elements (indices 5-12 = bytes 23-30);
+# see com.google.firebase.b.z() and the AREA_* note below.
 DATA_LAST_BRUSH_GESTURE_ARRAY = "last_brush_gesture_array"  # list[int] len=13 (bytes 18-30)
 DATA_LAST_BRUSH_POWER_ARRAY = "last_brush_power_array"  # list[int] len=12, each 0-3 (nibbles from bytes 30-32)
-DATA_BRUSH_MODE = "brush_mode"  # int: active brushing mode number from 0302 device-settings response (byte 5)
+DATA_BRUSH_MODE = "brush_mode"  # int: active brushing mode number (0302 byte 5 – g/w0 layout: byte 12)
 DATA_LAST_POLL = "last_poll"  # Unix timestamp (seconds) of the last successful BLE poll
 DATA_DURATION_RATIO = "duration_ratio"  # int 0-100+: duration/240*100 (APK: MineReportModel.timeLongRatio)
 
@@ -170,14 +197,17 @@ DATA_DURATION_RATIO = "duration_ratio"  # int 0-100+: duration/240*100 (APK: Min
 COVERAGE_PRESSURE_THRESHOLD = 100
 
 # Per-zone coverage threshold for the gestureArray path (TYPE1 *B# records). This
-# reproduces the official app's on-device tooth-diagram logic, fully verified from
-# the APK — both the formula (C1793b.m3804z) and the i10 multiplier (smali: the
-# caller in MineReportActivity passes BrushRecordEntity.getTimeLong(), the session
-# duration):
-#       norm[k] = raw[k] / sum * duration_seconds
-#       zone "covered" (good) when norm[k] >= threshold
-# 8-zone path thresholds: 8 / 9 / 10 (YD0003 / default / Y3PD). We use the default
-# (9) for all TYPE1 devices; the YD0003 / Y3PD variants are not distinguished yet.
+# reproduces the official app's on-device tooth-diagram logic. Verified directly in the
+# decompiled APK: `com/google/firebase/b.java:1020-1102` (`z(String[] gestureArray,
+# int timeLong, cc.a device)`), dispatched from `tg/a.java:36-103` for every device whose
+# `cc.a.getDentalCast() == 8` (OCLEANY3S/Y3M/Y3/Y3P/Y3PD/Y3T/Y3D*/R3L …):
+#       norm[k] = raw[k] * duration_seconds / sum(raw)      (else-branch, i.e. when
+#                                                            isNewValidBrushTime()==false)
+#       zone "covered" (diagram level 3) when norm[k] >= threshold
+# The 8 raw zone values are gestureArray indices 5-12 (see `i13 = strArr.length > 12 ? 1 : 0`
+# plus offset +4) = record bytes 23-30.
+# Thresholds (APK b.java:1073/1082/1091): OCLEANY3PD -> 10.0, YD0003 -> 8.0, all others
+# (incl. OCLEANY3S, Y3M, Y3P) -> 9.0.
 #
 # Equivalently the decision is the zone's SHARE of the total: raw[k]/sum >= 9/duration.
 # Callers pass `share_threshold = AREA_COVERAGE_NORM_THRESHOLD / duration` to
@@ -342,6 +372,15 @@ OCLEANY5_SCHEMES: dict[int, tuple[str, list[tuple[int, int]]]] = {
 
 # Per-model scheme dict overrides.  Models not listed fall back to OCLEANY3M_SCHEMES
 # (which covers all other TYPE1 devices: OCLEANY3M*, OCLEANY3P*, OCLEANY3D*, OCLEANX20, …).
+#
+# UNBELEGT: the APK does not contain a scheme table at all.  `pNum < 230` selects a
+# BrushPlan, otherwise a WashScheme (`kg/a.java:112-120`); the rows live in a Room table
+# with a `DeviceType` column (`rc/a.java:93`) and are looked up per device model
+# (`tc.b.e(schemeId, deviceModel)`), i.e. they are delivered by the cloud
+# (`GET /Romap/v1/DeviceContoller/GetAllResources`) – see also
+# docs/OCLEANY3S-AUDIT.md.  OCLEANY3S therefore uses the OCLEANY3 list (which adds
+# pnum 90) purely on the strength of that API response; pnum 90 is documented in this
+# file as exclusive to the OCLEANY3 deviceType, so for OCLEANY3S it is unconfirmed.
 SCHEMES_BY_MODEL: dict[str, dict[int, tuple[str, list[tuple[int, int]]]]] = {
     "OCLEANY3": OCLEANY3_SCHEMES,  # has exclusive pnum 90
     "OCLEANY3S": OCLEANY3_SCHEMES,

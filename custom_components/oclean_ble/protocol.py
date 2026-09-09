@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 from .const import (
     CHANGE_INFO_UUID,
-    CMD_DEVICE_INFO,
     CMD_QUERY_DEVICE_SETTINGS,
     CMD_QUERY_RUNNING_DATA,
     CMD_QUERY_RUNNING_DATA_T1,
@@ -20,6 +19,8 @@ from .const import (
     READ_NOTIFY_CHAR_UUID,
     RECEIVE_BRUSH_UUID,
     SEND_BRUSH_CMD_UUID,
+    SETTINGS_LAYOUT_GENERIC,
+    SETTINGS_LAYOUT_W0,
     WRITE_CHAR_UUID,
 )
 
@@ -44,6 +45,10 @@ class DeviceProtocol:
                              payload (Type-1 / Type-Z1 format, mo5292L in APK).  False
                              uses the 020E + 4-byte big-endian Unix timestamp (Type-0
                              default).
+        settings_layout:     Payload layout of the 0302 device-settings response.
+                             ``SETTINGS_LAYOUT_W0`` for devices handled by APK class
+                             ``g.w0`` (OCLEANY3/Y3S/Y3M/… and the A1 family),
+                             ``SETTINGS_LAYOUT_GENERIC`` otherwise.  See const.py.
     """
 
     name: str
@@ -52,6 +57,7 @@ class DeviceProtocol:
     supports_pagination: bool
     write_char: str = WRITE_CHAR_UUID
     uses_t1_calibration: bool = False
+    settings_layout: str = SETTINGS_LAYOUT_GENERIC
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +71,6 @@ TYPE0 = DeviceProtocol(
     notify_chars=(READ_NOTIFY_CHAR_UUID, CHANGE_INFO_UUID),
     query_commands=(
         (WRITE_CHAR_UUID, CMD_QUERY_STATUS),
-        (WRITE_CHAR_UUID, CMD_DEVICE_INFO),
         (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS),
         (WRITE_CHAR_UUID, CMD_QUERY_RUNNING_DATA),
     ),
@@ -78,7 +83,6 @@ TYPE1 = DeviceProtocol(
     notify_chars=(READ_NOTIFY_CHAR_UUID, RECEIVE_BRUSH_UUID),  # fbb89 write-only, subscribe always fails
     query_commands=(
         (SEND_BRUSH_CMD_UUID, CMD_QUERY_STATUS),
-        (SEND_BRUSH_CMD_UUID, CMD_DEVICE_INFO),
         (SEND_BRUSH_CMD_UUID, CMD_QUERY_DEVICE_SETTINGS),
         (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1),
     ),
@@ -88,6 +92,21 @@ TYPE1 = DeviceProtocol(
     # Only the 0307 query command uses f12582C = fbb89.
     write_char=WRITE_CHAR_UUID,
     uses_t1_calibration=True,
+)
+
+#: Type-1 (Y3 family) – APK handler ``g.w0`` mode 1.
+#: OCLEANY3 / OCLEANY3S / OCLEANY3T / OCLEANY3M* / OCLEANY3N / OCLEANY3D* / OCLEANR3L
+#: (protocol IDs 8, 9, 10, 14, 25, 26, 27, 28, 30, 32, 33, 43, 38).
+#: Identical BLE stack to TYPE1, but the 0302 settings payload uses the ``g.w0`` layout
+#: (no battery byte, no modeNum byte, head counters at bytes 25-30).
+TYPE1_Y3 = DeviceProtocol(
+    name="Type-1 (Y3/C3385w0)",
+    notify_chars=(READ_NOTIFY_CHAR_UUID, RECEIVE_BRUSH_UUID),
+    query_commands=TYPE1.query_commands,
+    supports_pagination=False,
+    write_char=WRITE_CHAR_UUID,
+    uses_t1_calibration=True,
+    settings_layout=SETTINGS_LAYOUT_W0,
 )
 
 #: Type-Z1 – Oclean Z1 / OCLEANY5
@@ -102,7 +121,6 @@ TYPE_Z1 = DeviceProtocol(
     notify_chars=(READ_NOTIFY_CHAR_UUID, RECEIVE_BRUSH_UUID),
     query_commands=(
         (WRITE_CHAR_UUID, CMD_QUERY_STATUS),
-        (WRITE_CHAR_UUID, CMD_DEVICE_INFO),
         (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS),
         (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1),
     ),
@@ -125,11 +143,14 @@ LEGACY = DeviceProtocol(
     notify_chars=(READ_NOTIFY_CHAR_UUID,),
     query_commands=(
         (WRITE_CHAR_UUID, CMD_QUERY_STATUS),  # 0303 – state + battery (byte 3)
-        (WRITE_CHAR_UUID, CMD_DEVICE_INFO),  # 0202 – device info ACK
         (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS),  # 0302 – brush-head counter
         (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1),  # 0307 via fbb89 – session data
     ),
     supports_pagination=False,
+    # The Air-1 family is handled by the same APK class as the Y3 family
+    # (`g.w0` mode 0, `i/a.java:286-299`), so it shares the 0302 payload layout.
+    # Battery still comes from 0303 byte 3 and the 0x2A19 characteristic.
+    settings_layout=SETTINGS_LAYOUT_W0,
 )
 
 #: Unknown – fallback for unrecognised or absent model IDs.
@@ -145,7 +166,6 @@ UNKNOWN = DeviceProtocol(
     ),
     query_commands=(
         (WRITE_CHAR_UUID, CMD_QUERY_STATUS),
-        (WRITE_CHAR_UUID, CMD_DEVICE_INFO),
         (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS),
         (WRITE_CHAR_UUID, CMD_QUERY_RUNNING_DATA),
         (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1),
@@ -160,21 +180,27 @@ UNKNOWN = DeviceProtocol(
 
 _MODEL_MAP: dict[str, DeviceProtocol] = {
     # ------------------------------------------------------------------
-    # Type-1 – 0307 push via RECEIVE_BRUSH_UUID / SEND_BRUSH_CMD_UUID
-    # APK handler: C3385w0 mode=1
+    # Type-1, APK handler g.w0 mode 1 (Y3 family) – 0307 push via
+    # RECEIVE_BRUSH_UUID / SEND_BRUSH_CMD_UUID, g/w0 0302 settings layout.
     # ------------------------------------------------------------------
-    "OCLEANY3M": TYPE1,  # Oclean X              – confirmed (logs 2026-02-21)
-    "OCLEANY3MH": TYPE1,  # Oclean X (HW variant) – confirmed (logs 2026-03-09, issue #19)
-    "OCLEANY3MT": TYPE1,  # Oclean X (T)          – APK DeviceType 25
-    "OCLEANY3MTN": TYPE1,  # Oclean X (TN)         – APK DeviceType 26
-    "OCLEANY3MN": TYPE1,  # Oclean X (N)          – APK DeviceType 27
-    "OCLEANY3N": TYPE1,  # Oclean X (N model)    – APK DeviceType 28
-    "OCLEANY3MD": TYPE1,  # Oclean X (MD)         – APK DeviceType 30
-    "OCLEANY3D": TYPE1,  # Oclean X (D)          – APK DeviceType 32
-    "OCLEANY3D1": TYPE1,  # Oclean X (D1)         – APK DeviceType 33
-    "OCLEANY3D2": TYPE1,  # Oclean X (D2)         – APK DeviceType 43
-    "OCLEANR3L": TYPE1,  # Oclean R3L            – APK DeviceType 38
-    # APK handler: C3352g mode=0  (same BLE structure as OCLEANY3P)
+    "OCLEANY3M": TYPE1_Y3,  # Oclean X              – confirmed (logs 2026-02-21)
+    "OCLEANY3MH": TYPE1_Y3,  # Oclean X (HW variant) – confirmed (logs 2026-03-09, issue #19)
+    "OCLEANY3MT": TYPE1_Y3,  # Oclean X (T)          – APK DeviceType 25
+    "OCLEANY3MTN": TYPE1_Y3,  # Oclean X (TN)         – APK DeviceType 26
+    "OCLEANY3MN": TYPE1_Y3,  # Oclean X (N)          – APK DeviceType 27
+    "OCLEANY3N": TYPE1_Y3,  # Oclean X (N model)    – APK DeviceType 28
+    "OCLEANY3MD": TYPE1_Y3,  # Oclean X (MD)         – APK DeviceType 30
+    "OCLEANY3D": TYPE1_Y3,  # Oclean X (D)          – APK DeviceType 32
+    "OCLEANY3D1": TYPE1_Y3,  # Oclean X (D1)         – APK DeviceType 33
+    "OCLEANY3D2": TYPE1_Y3,  # Oclean X (D2)         – APK DeviceType 43
+    "OCLEANR3L": TYPE1_Y3,  # Oclean R3L            – APK DeviceType 38
+    # APK handler: g.w0 mode 1 (`i/a.java:320-341`, cases 13-25)
+    "OCLEANY3": TYPE1_Y3,  # Oclean X Pro          – corrected (logs 2026-03-10, issue #49)
+    "OCLEANY3S": TYPE1_Y3,  # Oclean X Pro (S)      – APK protocol 9 / case 14
+    "OCLEANY3T": TYPE1_Y3,  # Oclean X Pro (T)      – APK protocol 10
+    # ------------------------------------------------------------------
+    # Type-1 – APK handler C3352g (`g.g` mode 0): 0307 push, generic 0302 layout
+    # ------------------------------------------------------------------
     "OCLEANY3P": TYPE1,  # Oclean X Pro Elite    – confirmed (logs 2026-02-25, issue #3)
     "OCLEANY3PB": TYPE1,  # Oclean X Pro Digital  – confirmed TYPE1 BLE stack (issue #89)
     "OCLEANY3PD": TYPE1,  # Oclean X Pro Elite D  – APK DeviceType 29
@@ -183,17 +209,6 @@ _MODEL_MAP: dict[str, DeviceProtocol] = {
     # Same year_byte=0/021f/5100 pattern as OCLEANY3P.
     "OCLEANX20": TYPE1,  # Oclean X Pro 20       – confirmed (logs 2026-03-09, issue #37)
     "OCLEANV1a": TYPE1,  # Oclean X Ultra        – confirmed TYPE1 inline format (issue #81)
-    # ------------------------------------------------------------------
-    # Type-1 – Oclean X Pro / OCLEANY3 family
-    # Previously mapped to Type-0 (0308/fbb86) based on APK analysis, but
-    # empirical BLE logs (issue #49, 2026-03-10) show the device only pushes
-    # session data when CMD 0307 is sent to fbb89 (SEND_BRUSH_CMD_UUID).
-    # With Type-0 the device receives 0308 on fbb85 and returns nothing.
-    # The response uses the same *B# multi-packet format as OCLEANY3P.
-    # ------------------------------------------------------------------
-    "OCLEANY3": TYPE1,  # Oclean X Pro          – corrected (logs 2026-03-10, issue #49)
-    "OCLEANY3S": TYPE1,  # Oclean X Pro (S)      – APK DeviceType 9
-    "OCLEANY3T": TYPE1,  # Oclean X Pro (T)      – APK DeviceType 10
     # ------------------------------------------------------------------
     # Type-Z1 – Oclean Z1 / OCLEANY5
     # APK handler: C3350f mode=1

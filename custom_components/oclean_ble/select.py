@@ -17,7 +17,7 @@ from .const import (
 )
 from .coordinator import OcleanCoordinator
 from .entity import OcleanEntity
-from .protocol import TYPE1, TYPE_Z1, is_known_model, protocol_for_model
+from .protocol import TYPE1, TYPE1_Y3, TYPE_Z1, is_known_model, protocol_for_model
 
 
 def _schemes_for_model(
@@ -32,7 +32,7 @@ def _schemes_for_model(
     if not model_id or not is_known_model(model_id):
         return None
     proto = protocol_for_model(model_id)
-    if proto is TYPE1:
+    if proto is TYPE1 or proto is TYPE1_Y3:
         return SCHEMES_BY_MODEL.get(model_id, OCLEANY3M_SCHEMES)
     if proto is TYPE_Z1:
         return SCHEMES_BY_MODEL.get(model_id)

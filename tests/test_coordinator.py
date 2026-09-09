@@ -1130,7 +1130,7 @@ class TestImportNewSessionsWithRecorder:
         add_fn = MagicMock()
         hass = _make_hass()
 
-        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, add_fn)):
+        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, None, add_fn)):
             sessions = [{"last_brush_time": 1_700_000_001, DATA_LAST_BRUSH_SCORE: 80}]
             new_ts = await import_new_sessions(hass, "aa_bb_cc_dd_ee_ff", "Oclean", sessions, 0)
 
@@ -1145,7 +1145,7 @@ class TestImportNewSessionsWithRecorder:
         add_fn = MagicMock()
         hass = _make_hass()
 
-        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, add_fn)):
+        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, None, add_fn)):
             sessions = [{"last_brush_time": 1_700_000_001}]
             new_ts = await import_new_sessions(hass, "aa_bb_cc_dd_ee_ff", "Oclean", sessions, 9_999_999_999)
 
@@ -1174,7 +1174,7 @@ class TestImportNewSessionsWithRecorder:
         hass = _make_hass()
         areas = {"upper_left_out": 20, "lower_right_in": 15}
 
-        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, add_fn)):
+        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, None, add_fn)):
             sessions = [{"last_brush_time": 1_700_000_002, DATA_LAST_BRUSH_AREAS: areas}]
             await import_new_sessions(hass, "aa_bb_cc_dd_ee_ff", "Oclean", sessions, 0)
 
@@ -1191,7 +1191,7 @@ class TestImportNewSessionsWithRecorder:
         add_fn = MagicMock(side_effect=Exception("stat write failed"))
         hass = _make_hass()
 
-        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, add_fn)):
+        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, None, add_fn)):
             sessions = [{"last_brush_time": 1_700_000_003, DATA_LAST_BRUSH_SCORE: 90}]
             # Must not raise despite add_fn failing
             new_ts = await import_new_sessions(hass, "aa_bb_cc_dd_ee_ff", "Oclean", sessions, 0)
@@ -1209,7 +1209,7 @@ class TestImportNewSessionsWithRecorder:
         hass = _make_hass()
         areas = {"upper_left_out": 30}
 
-        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, add_fn)):
+        with patch("custom_components.oclean_ble.statistics._load_recorder_api", return_value=(_SD, _SM, None, add_fn)):
             sessions = [{"last_brush_time": 1_700_000_004, DATA_LAST_BRUSH_AREAS: areas}]
             new_ts = await import_new_sessions(hass, "aa_bb_cc_dd_ee_ff", "Oclean", sessions, 0)
 
@@ -1267,9 +1267,11 @@ class TestLoadRecorderAPIFallback:
                     sys.modules[k] = v
 
         assert result is not None
-        SD, SM, add_fn = result
+        SD, SM, mean_type, add_fn = result
         assert SD is FakeSD
         assert SM is FakeSM
+        # StatisticMeanType is optional (HA < 2026.7) – the stub does not define it
+        assert mean_type is None
 
     def test_both_paths_fail_returns_none(self):
         """When both import attempts fail, _load_recorder_api returns None."""
@@ -2750,17 +2752,18 @@ class TestStandaloneWrites:
 class TestTypeZ1Protocol:
     """Verify Type-Z1 (Oclean Z1 / OCLEANY5) hybrid command routing.
 
-    Type-Z1 routes 0303/0202/0302 via fbb85 (WRITE_CHAR_UUID) and 0307 via
+    Type-Z1 routes 0303/0302 via fbb85 (WRITE_CHAR_UUID) and 0307 via
     fbb89 (SEND_BRUSH_CMD_UUID).  Time calibration uses the 0201 + 8-byte
     datetime format (same as TYPE1, because uses_t1_calibration=True).
     Standalone writes (area_remind, brush_head_max_days) use fbb85 as write_char.
+    The 0202 clearRunningDate command is not polled at all.
     """
 
     @pytest.mark.asyncio
     async def test_query_commands_hybrid_routing(self):
         """Each query command must be sent to the characteristic declared in TYPE_Z1."""
         from custom_components.oclean_ble.const import (
-            CMD_DEVICE_INFO,
+            CMD_CLEAR_RUNNING_DATA,
             CMD_QUERY_DEVICE_SETTINGS,
             CMD_QUERY_RUNNING_DATA_T1,
             CMD_QUERY_STATUS,
@@ -2779,12 +2782,13 @@ class TestTypeZ1Protocol:
         await coord._send_query_commands(client, event)
 
         calls = {(args[0][0], args[0][1]): True for args in client.write_gatt_char.call_args_list}
-        # 0303, 0202, 0302 must go via fbb85
+        # 0303, 0302 must go via fbb85
         assert (WRITE_CHAR_UUID, CMD_QUERY_STATUS) in calls
-        assert (WRITE_CHAR_UUID, CMD_DEVICE_INFO) in calls
         assert (WRITE_CHAR_UUID, CMD_QUERY_DEVICE_SETTINGS) in calls
         # 0307 must go via fbb89
         assert (SEND_BRUSH_CMD_UUID, CMD_QUERY_RUNNING_DATA_T1) in calls
+        # 0202 is clearRunningDate – never polled
+        assert all(cmd != CMD_CLEAR_RUNNING_DATA for _, cmd in calls)
 
     @pytest.mark.asyncio
     async def test_time_calibration_uses_0201_format(self):
