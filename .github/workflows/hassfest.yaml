@@ -12,6 +12,19 @@ permissions: {}
 jobs:
   validate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # pull ghcr.io/home-assistant/hassfest with the workflow token
     steps:
       - uses: actions/checkout@v6
+      # The hassfest action pulls ghcr.io/home-assistant/hassfest.  Anonymous
+      # pulls are frequently throttled by Docker Hub ("toomanyrequests"), which
+      # failed this workflow repeatedly; authenticating with the workflow token
+      # removes that rate limit.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: home-assistant/actions/hassfest@master
