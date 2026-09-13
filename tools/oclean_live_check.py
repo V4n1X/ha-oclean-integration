@@ -296,6 +296,37 @@ async def run(args: argparse.Namespace) -> int:
             _LOGGER.warning("could NOT subscribe: %s", uuid[-8:])
     report["subscribed"] = subscribed
 
+    # Characteristics without a CCCD descriptor (OCLEANY3S exposes none on
+    # fbb86/fbb88/fbb90) cannot be subscribed to on WinRT/BlueZ-with-CCCD-check.
+    # The app only calls setCharacteristicNotification() locally, which Android
+    # allows without a CCCD.  Fallback: poll the readable characteristic value,
+    # exactly like OcleanCoordinator._read_response_char_fallback().
+    poll_chars = [u for u in profile.notify_chars if u not in subscribed]
+    if poll_chars:
+        _LOGGER.warning(
+            "no CCCD on %s – falling back to READ polling of the response characteristic(s)",
+            [u[-8:] for u in poll_chars],
+        )
+    report["poll_chars"] = poll_chars
+
+    async def read_poll(times: int, delay: float, label: str) -> int:
+        """Read every polled characteristic *times* and feed the session handler."""
+        got = 0
+        for i in range(times):
+            for uuid in poll_chars:
+                try:
+                    data = bytes(await client.read_gatt_char(uuid))
+                except Exception as exc:
+                    _LOGGER.debug("read %s failed: %s", uuid[-8:], exc)
+                    continue
+                if data and data != b"\x00":
+                    got += 1
+                    _LOGGER.info("  READ %s [%s]: %s", uuid[-8:], label, data.hex())
+                    session.handle(None, bytearray(data))
+            if i + 1 < times:
+                await asyncio.sleep(delay)
+        return got
+
     # --- query commands, paced exactly like the app --------------------------
     # APK: single-thread queue, wait for the answer (receiveTimeout 5000 ms),
     # then SystemClock.sleep(100) before the next command (g/e.java:139).
@@ -309,17 +340,30 @@ async def run(args: argparse.Namespace) -> int:
         except Exception as exc:
             _LOGGER.warning("send %s failed: %s", cmd.hex(), exc)
             continue
-        try:
-            await asyncio.wait_for(session.answered.wait(), timeout=args.command_wait)
-            _LOGGER.info("  answered")
-        except asyncio.TimeoutError:
-            _LOGGER.warning("  no answer within %.1fs – stopping the sequence", args.command_wait)
-            break
+
+        if poll_chars:
+            # Read the answer instead of waiting for a notification.
+            if cmd == _const.CMD_QUERY_RUNNING_DATA_T1:
+                # the *B# record stream can span several reads
+                await read_poll(times=args.record_reads, delay=0.4, label=cmd.hex())
+            else:
+                await read_poll(times=3, delay=0.3, label=cmd.hex())
+        else:
+            try:
+                await asyncio.wait_for(session.answered.wait(), timeout=args.command_wait)
+                _LOGGER.info("  answered")
+            except asyncio.TimeoutError:
+                _LOGGER.warning("  no answer within %.1fs – stopping the sequence", args.command_wait)
+                break
         await asyncio.sleep(0.1)
     report["commands_sent"] = sent
 
-    _LOGGER.info("collecting notifications for %ss ...", args.collect)
-    await asyncio.sleep(args.collect)
+    if poll_chars:
+        _LOGGER.info("extra read poll (%d x 0.4 s) for trailing records ...", args.record_reads)
+        await read_poll(times=args.record_reads, delay=0.4, label="post")
+    else:
+        _LOGGER.info("collecting notifications for %ss ...", args.collect)
+        await asyncio.sleep(args.collect)
     session.flush_partial()
 
     # --- battery -------------------------------------------------------------
@@ -389,6 +433,12 @@ def main() -> int:
         type=float,
         default=5.0,
         help="seconds to wait for each command's answer (APK receiveTimeout 5000 ms)",
+    )
+    ap.add_argument(
+        "--record-reads",
+        type=int,
+        default=12,
+        help="READ polls of the response characteristic while fetching the *B# stream (default 12)",
     )
     ap.add_argument(
         "--min-battery",

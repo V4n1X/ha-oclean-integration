@@ -289,24 +289,82 @@ Zeitkalibrierung, ohne Pairing-Versuch, Kommandos getaktet).
 | Batterie (2A19, 3× gelesen) | **1 %** |
 | Zustand danach | ✅ Bürste weiterhin ansprechbar, **kein** Hänger |
 
-**Bewertung.** ATT-Fehlercode `0x03` (Write Not Permitted) kommt **vom Gerät** –
-es lehnt den Descriptor-Schreibzugriff aktiv ab. Zwei Hypothesen:
+**Erste Bewertung (überholt, siehe 2.14).** Zunächst wurden „Akku zu niedrig" und
+„fehlende Kopplung" als Ursachen vermutet. Die anschließende GATT-Diagnose hat
+beides widerlegt.
 
-1. **Akku bei 1 %**: Das Gerät verweigert das Aktivieren von Notifications im
-   Energiesparmodus. Dafür spricht, dass der Nutzer Hänger bisher genau beim
-   Leerlaufen des Akkus beobachtet hat und die Bürste hier sonst normal antwortet.
-2. **Fehlende Kopplung**: ATT 0x03 wird von manchen Peripheriegeräten auch
-   zurückgegeben, wenn ein Schreibzugriff eine verschlüsselte Verbindung
-   voraussetzt. Die Kopplung wurde in diesem Lauf bewusst entfernt.
+### 2.14 Ursache gefunden: `fbb86`/`fbb90` haben **kein CCCD** ⚠️
 
-**Nicht unterscheidbar**, solange der Akku leer ist. Nächster Schritt: Akku
-laden und erneut messen; erst wenn das CCCD-Abo dann weiterhin scheitert, ist
-Hypothese 2 zu prüfen (Kopplung) — das wäre ein Eingriff, der mit dem Nutzer
-abzustimmen ist, weil er SMP auf dem Gerät auslöst.
+Eine reine Lese-Diagnose (nur Verbindung + Service-/Descriptor-Tabelle + Akku-Read)
+liefert die tatsächliche Ursache:
 
-**Positiv:** Die neue, getaktete Sequenz hat die Bürste **nicht** in einen Hänger
-gebracht – der Abbruch nach der ersten ausbleibenden Antwort funktionierte wie
-vorgesehen.
+```
+9d84b9a3-…bb85  [write,read]   CCCD=NO   handle=20
+5f78df94-…bb86  [read,notify]  CCCD=NO   handle=22   <-- von der App abonniert
+5f78df94-…bb87  [write,read]   CCCD=NO   handle=24
+5f78df94-…bb88  [read,notify]  CCCD=NO   handle=26
+5f78df94-…bb89  [write,read]   CCCD=NO   handle=28
+5f78df94-…bb90  [read,notify]  CCCD=NO   handle=30   <-- von der App abonniert
+5f78df94-…bb91  [read,notify]  CCCD=yes  handle=32   <-- von der App NICHT benutzt
+00002a19        [read,notify]  CCCD=yes              <-- Abo funktioniert
+```
+
+**Die Firmware exponiert für `fbb86`, `fbb88` und `fbb90` keinen
+Client-Configuration-Descriptor.** Dass die Tabelle korrekt gelesen wurde, belegt
+das CCCD auf `fbb91` **und** auf `2A19` aus derselben Sitzung.
+
+Konsequenzen:
+
+* Die APK braucht kein CCCD: `g/e.java:W()` ruft
+  `setCharacteristicNotification(char, true)` – ein **lokaler** Android-Aufruf –
+  und schreibt Descriptoren nur, *falls welche existieren* (Schleife über
+  `getDescriptors()`, hier leer). Das Gerät pusht Notifications ohne
+  CCCD-Freigabe.
+* **WinRT (Windows) kann so nicht abonnieren**: `start_notify` schreibt das CCCD
+  und bekommt vom Gerät ATT `0x03` (Write Not Permitted) – genau das, was in
+  2.13 als „Gerät lehnt ab" gemessen wurde. `start_notify(2A19)` funktioniert,
+  weil dieser Descriptor existiert.
+* Der Akkustand (1 %) und die Kopplung sind **nicht** die Ursache.
+* BlueZ akzeptiert `StartNotify` ohne CCCD (deshalb funktioniert die Integration
+  für OCLEANA1, das denselben Zustand hat).
+
+**Codeänderung:** `_has_cccd()` prüft jetzt **vor** dem Abo, ob ein CCCD vorhanden
+ist. Fehlt es, geht der Code direkt den No-CCCD-Pfad
+(`_try_subscribe_no_cccd`, synthetischer Descriptor) und spart den
+aussichtslosen Descriptor-Schreibzugriff – auf fragiler Firmware verzichtbarer
+GATT-Verkehr. Schlägt auch das fehl, greift wie bisher der READ-Fallback.
+
+### 2.15 Dritter Hänger – Windows ist die falsche Testumgebung
+
+Der Versuch, mit dem Read-Fallback doch noch Daten zu holen, hat die Bürste
+**erneut** aufgehängt. Rekonstruktion des Laufs (17:35):
+
+| t | Aktion | Ergebnis |
+|---|---|---|
+| +0 s | Verbindung, DIS, Akku | ✅ |
+| +0 s | `start_notify` fbb86/fbb90 | ❌ ATT 0x03 (kein CCCD) |
+| +0 s | `0303` an `…bb85` | geschrieben |
+| +1 s | Read-Polls auf fbb86/fbb90 | leer |
+| +1 s | `030201` an `…bb85` | geschrieben |
+| +2 s | Read-Polls | leer |
+| +15 s | `0307` an `…bb89` | ❌ abgebrochen – **Link war tot** |
+| danach | Gerät advertising-frei | **hängend** |
+
+Vergleich mit dem vorherigen Lauf (17:29), der das Gerät **nicht** beschädigt hat:
+Dort wurde nur `0303` geschrieben und die Sequenz nach der ersten ausbleibenden
+Antwort abgebrochen. Der hängende Lauf hat zusätzlich `030201` geschrieben.
+
+**Fazit.** Auf Windows sind die Antworten nicht empfangbar (kein CCCD), also
+kann der Poll hier gar nicht funktionieren – und das Schreiben von Kommandos ohne
+Empfangsmöglichkeit hat das Gerät zweimal in den Hänger getrieben.
+
+> **Empfehlung: OCLEANY3S nicht von Windows aus pollen.** Der Hardware-Test
+> gehört auf den echten HA-Host (Linux/BlueZ) oder über einen ESPHome-Proxy.
+> Dort ist `StartNotify` ohne CCCD möglich und die Sequenz kann vollständig
+> validiert werden. Für Windows-Setups ist das Gerät read-only zu behandeln.
+
+**Positiv:** Beide Hänger traten **nur** bei schreibenden Läufen auf; reine
+Lese-Sitzungen (Service-Dump, Akku, DIS) liefen mehrfach stabil durch.
 
 ---
 

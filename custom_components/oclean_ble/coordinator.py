@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import dataclasses
 import datetime
+import inspect
 import logging
 import struct
 import time
@@ -103,6 +104,36 @@ _LOGGER = logging.getLogger(__name__)
 # Writing 0x0000 disables notifications/indications on the device side, clearing any
 # stale subscription state left over from a previous bonded or crashed connection.
 _CCCD_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+
+
+def _has_cccd(client: BleakClient, char_uuid: str) -> bool:
+    """True if *char_uuid* exposes a Client Characteristic Configuration descriptor.
+
+    Confirmed on hardware: OCLEANY3S (fw 1.0.0.19) has a CCCD only on fbb91 and
+    0x2A19 — fbb86, fbb88 and fbb90 do not.  The firmware pushes notifications
+    regardless, and Android's ``setCharacteristicNotification()`` does not need a
+    CCCD, which is why the official app works.  Host stacks that insist on a
+    descriptor write (WinRT) fail with ATT 0x03 "Write Not Permitted"; skipping
+    the attempt avoids that pointless GATT traffic.
+
+    Unknown characteristics (services not discovered / mock clients) return True
+    so the normal path is attempted.
+    """
+    try:
+        services = client.services
+        if services is None:
+            return True
+        char = services.get_characteristic(char_uuid)
+        if inspect.iscoroutine(char):
+            # Some test doubles expose an async getter; close it to avoid an
+            # "coroutine was never awaited" warning and assume CCCD present.
+            char.close()
+            return True
+        if char is None:
+            return True
+        return char.get_descriptor(_CCCD_UUID) is not None
+    except Exception:  # noqa: BLE001
+        return True
 
 
 async def _clear_cccd(client: BleakClient, char_uuid: str) -> None:
@@ -1504,13 +1535,34 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         be fragile about unexpected GATT traffic (a hung brush has been observed),
         so the happy path here is kept minimal and byte-identical to the app:
 
-          1. plain ``start_notify`` for every notify characteristic;
+          0. characteristics without a CCCD descriptor are detected up front — the
+             firmware pushes notifications without one (confirmed on hardware:
+             OCLEANY3S fw 1.0.0.19 exposes a CCCD only on fbb91 and 0x2A19, not on
+             fbb86/fbb90), and Android's ``setCharacteristicNotification()`` needs
+             none.  Attempting a descriptor write there would be pointless GATT
+             traffic and the host stack reports it as ATT 0x03 "Write Not
+             Permitted" (WinRT) — so those go straight to the no-CCCD path;
+          1. plain ``start_notify`` for every other notify characteristic;
           2. only on failure ("Notify acquired" / timeout) release the stale
              subscription, write 0x0000 to the CCCD and retry once;
           3. on persistent failure log an actionable warning for the user.
         """
         subscribed: set[str] = set()
         for char_uuid in self._protocol.notify_chars:
+            if not _has_cccd(client, char_uuid):
+                self._log.debug(
+                    "%s has no CCCD descriptor (firmware pushes without one) – using the no-CCCD path",
+                    char_uuid,
+                )
+                if await _try_subscribe_no_cccd(client, char_uuid, handler, self._log):
+                    subscribed.add(char_uuid)
+                else:
+                    self._log.debug(
+                        "could not enable notifications on %s without a CCCD – "
+                        "falling back to READ polling of the characteristic",
+                        char_uuid,
+                    )
+                continue
             try:
                 await asyncio.wait_for(
                     client.start_notify(char_uuid, handler),

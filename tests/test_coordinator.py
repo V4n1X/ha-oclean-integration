@@ -1535,6 +1535,93 @@ class TestSubscribeNotificationsRetry:
 
 
 # ---------------------------------------------------------------------------
+# Characteristics without a CCCD descriptor (OCLEANY3S fw 1.0.0.19)
+# ---------------------------------------------------------------------------
+
+
+def _client_without_cccd(char_uuids: list[str]):
+    """BleakClient mock whose given characteristics expose no CCCD descriptor."""
+    client = _make_bleak_client()
+
+    class _Char:
+        def __init__(self) -> None:
+            self.uuid = "x"
+
+        def get_descriptor(self, _uuid):
+            return None
+
+    class _Services:
+        def get_characteristic(self, uuid):
+            return _Char() if uuid in char_uuids else None
+
+        def __iter__(self):
+            return iter(())
+
+    client.services = _Services()
+    return client
+
+
+class TestNoCccdCharacteristics:
+    """The firmware pushes notifications without a CCCD (hardware-confirmed)."""
+
+    def test_has_cccd_false_when_descriptor_missing(self):
+        from custom_components.oclean_ble.coordinator import _has_cccd
+
+        client = _client_without_cccd([BATTERY_CHAR_UUID])
+        assert _has_cccd(client, BATTERY_CHAR_UUID) is False
+
+    def test_has_cccd_true_for_unknown_characteristic(self):
+        """Unknown chars (services not discovered, mock clients) use the normal path."""
+        from custom_components.oclean_ble.coordinator import _has_cccd
+
+        client = _client_without_cccd([])
+        assert _has_cccd(client, BATTERY_CHAR_UUID) is True
+
+    def test_has_cccd_true_for_mock_without_services(self):
+        from custom_components.oclean_ble.coordinator import _has_cccd
+
+        client = _make_bleak_client()  # services.get_characteristic -> None
+        assert _has_cccd(client, BATTERY_CHAR_UUID) is True
+
+    @pytest.mark.asyncio
+    async def test_subscribe_never_writes_a_descriptor_without_cccd(self):
+        """No CCCD descriptor write is attempted for a CCCD-less characteristic.
+
+        That write is exactly the one the device answers with ATT 0x03
+        "Write Not Permitted" on WinRT, so it must not be issued at all.
+        """
+        from custom_components.oclean_ble.protocol import TYPE1
+
+        coord = _make_coordinator()
+        coord._protocol = TYPE1
+        client = _client_without_cccd(list(TYPE1.notify_chars))
+        subscribed = await coord._subscribe_notifications(client, lambda _c, _d: None)
+
+        client.write_gatt_descriptor.assert_not_awaited()
+        # the injected no-CCCD path still subscribes (mock start_notify succeeds)
+        assert subscribed == frozenset(TYPE1.notify_chars)
+
+    @pytest.mark.asyncio
+    async def test_subscribe_no_cccd_injection_can_still_succeed(self):
+        """When the char *is* subscribable after CCCD injection, it is reported."""
+        from custom_components.oclean_ble.protocol import TYPE1
+
+        coord = _make_coordinator()
+        coord._protocol = TYPE1
+        client = _client_without_cccd(list(TYPE1.notify_chars))
+        started: list[str] = []
+
+        async def _fake_start_notify(uuid, _handler):
+            started.append(uuid)
+
+        client.start_notify = AsyncMock(side_effect=_fake_start_notify)
+        subscribed = await coord._subscribe_notifications(client, lambda _c, _d: None)
+
+        assert set(started) == set(TYPE1.notify_chars)  # injected path ran
+        assert subscribed == frozenset(TYPE1.notify_chars)
+
+
+# ---------------------------------------------------------------------------
 # _read_device_info_service – device registry update path (lines 556-576)
 # ---------------------------------------------------------------------------
 
