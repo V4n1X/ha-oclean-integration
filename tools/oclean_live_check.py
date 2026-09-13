@@ -211,6 +211,48 @@ async def run(args: argparse.Namespace) -> int:
     }
     _LOGGER.info("profile: %s (layout=%s)", profile.name, profile.settings_layout)
 
+    # --- GATT table dump (read-only) ----------------------------------------
+    # The decisive diagnostic: a characteristic without a CCCD descriptor cannot
+    # be subscribed to on stacks that insist on one (WinRT returns ATT 0x03).
+    gatt: list[dict[str, Any]] = []
+    for svc in client.services or []:
+        for ch in svc.characteristics:
+            has_cccd = ch.get_descriptor(CCCD_UUID) is not None
+            gatt.append(
+                {
+                    "service": str(svc.uuid),
+                    "characteristic": str(ch.uuid),
+                    "properties": list(ch.properties),
+                    "handle": getattr(ch, "handle", None),
+                    "has_cccd": has_cccd,
+                }
+            )
+    report["gatt"] = gatt
+    _LOGGER.info("GATT table (%d characteristics):", len(gatt))
+    for entry in gatt:
+        marker = ""
+        if entry["characteristic"].lower() in [u.lower() for u in profile.notify_chars]:
+            marker = "  <-- subscribed by the app" + ("" if entry["has_cccd"] else "  NO CCCD!")
+        _LOGGER.info(
+            "  %s [%s] CCCD=%s handle=%s%s",
+            entry["characteristic"],
+            ",".join(entry["properties"]),
+            "yes" if entry["has_cccd"] else "NO",
+            entry["handle"],
+            marker,
+        )
+
+    missing_cccd = [
+        e["characteristic"]
+        for e in gatt
+        if not e["has_cccd"] and e["characteristic"].lower() in [u.lower() for u in profile.notify_chars]
+    ]
+    if missing_cccd:
+        _LOGGER.warning(
+            "firmware exposes no CCCD for %s – this host will fall back to READ polling",
+            [u[-8:] for u in missing_cccd],
+        )
+
     session = Session(profile.settings_layout)
 
     # --- battery guard -------------------------------------------------------
