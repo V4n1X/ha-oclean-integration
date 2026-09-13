@@ -213,6 +213,37 @@ async def run(args: argparse.Namespace) -> int:
 
     session = Session(profile.settings_layout)
 
+    # --- battery guard -------------------------------------------------------
+    # A nearly empty brush is the state in which the firmware is least reliable
+    # (notification enable is refused with ATT 0x03, and the owner has seen the
+    # brush hang when the battery ran out).  Reads are safe; anything that
+    # writes to the device is not done below MIN_SAFE_BATTERY.
+    battery: int | None = None
+    try:
+        battery = _parser.parse_battery(bytes(await client.read_gatt_char(BATTERY)))
+    except Exception as exc:
+        _LOGGER.warning("battery read failed: %s", exc)
+    report["battery"] = battery
+    _LOGGER.info("battery: %s%%", battery)
+
+    if battery is not None and battery < args.min_battery:
+        _LOGGER.error(
+            "battery is %d%% (< %d%%) – skipping all writes/subscriptions. "
+            "Charge the brush and run again; only reads were performed.",
+            battery,
+            args.min_battery,
+        )
+        report["aborted_reason"] = f"battery {battery}% below minimum {args.min_battery}%"
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        _print_summary(dis, profile, [], [], session, report, battery)
+        if args.out:
+            _write_report(args.out, report)
+        return 2
+
+
     # --- time calibration ----------------------------------------------------
     if args.calibrate:
         if profile.uses_t1_calibration:
@@ -311,6 +342,19 @@ async def run(args: argparse.Namespace) -> int:
     report["collected"] = session.collected
     report["record_count"] = session.record_count
 
+    _print_summary(dis, profile, subscribed, sent, session, report, report.get("battery"))
+
+    if args.out:
+        _write_report(args.out, report)
+
+    if not session.raw:
+        print("\n  WARNING: no notification received at all – the CCCD subscribe or the")
+        print("  query commands did not reach the device.")
+        return 1
+    return 0
+
+
+def _print_summary(dis, profile, subscribed, sent, session, report, battery) -> None:
     print()
     print("=" * 68)
     print(f"  Live check – {dis.get('model')} (fw {dis.get('fw')}, hw {dis.get('hw')})")
@@ -320,21 +364,18 @@ async def run(args: argparse.Namespace) -> int:
     print(f"  commands sent     {sent}")
     print(f"  notifications     {len(session.raw)}")
     print(f"  *B# record count  {session.record_count}")
-    print(f"  battery           {report['battery']}")
+    print(f"  battery           {battery}")
+    if report.get("aborted_reason"):
+        print(f"  ABORTED           {report['aborted_reason']}")
     for key in sorted(session.collected):
         print(f"  {key:24s} {session.collected[key]}")
     print("=" * 68)
 
-    if args.out:
-        out = Path(args.out)
-        out.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        _LOGGER.info("report written to %s (contains the MAC – do not commit)", out)
 
-    if not session.raw:
-        print("\n  WARNING: no notification received at all – the CCCD subscribe or the")
-        print("  query commands did not reach the device.")
-        return 1
-    return 0
+def _write_report(path: str, report: dict[str, Any]) -> None:
+    out = Path(path)
+    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _LOGGER.info("report written to %s (contains the MAC – do not commit)", out)
 
 
 def main() -> int:
@@ -349,8 +390,26 @@ def main() -> int:
         default=5.0,
         help="seconds to wait for each command's answer (APK receiveTimeout 5000 ms)",
     )
-    ap.add_argument("--no-calibrate", action="store_true", help="skip the 0201 time-calibration write")
-    ap.add_argument("--no-unpair", action="store_true", help="do not remove a stale Windows bond first")
+    ap.add_argument(
+        "--min-battery",
+        type=int,
+        default=20,
+        help="refuse all writes/notifications below this battery level (default 20)",
+    )
+    ap.add_argument(
+        "--no-calibrate",
+        dest="calibrate",
+        action="store_false",
+        default=True,
+        help="skip the 0201 time-calibration write",
+    )
+    ap.add_argument(
+        "--no-unpair",
+        dest="unpair",
+        action="store_false",
+        default=True,
+        help="do not remove a stale Windows bond first (a stale bond makes GATT calls fail with 'Unreachable')",
+    )
     ap.add_argument("--out", help="write a JSON report to this path (personal data!)")
     args = ap.parse_args()
     return asyncio.run(run(args))

@@ -273,6 +273,41 @@ Damit sind jetzt auch die letzten bekannten Unterschiede im Normalbetrieb
 beseitigt; übrig bleiben nur **reaktive** Fallbacks (CCCD-Retry, Read-Fallback,
 Polling-Fallback), die im fehlerfreien Ablauf nicht greifen.
 
+### 2.13 Hardware-Test 2 (2026-09-09, nach Akku-Entladung)
+
+Zweiter Live-Versuch mit der **APK-treuen** Sequenz (lesend, ohne
+Zeitkalibrierung, ohne Pairing-Versuch, Kommandos getaktet).
+
+| Beobachtung | Ergebnis |
+|---|---|
+| Scan / Verbindung | ✅ Gerät gefunden, Verbindung hält |
+| Bond | veraltete Windows-Kopplung erneut vorhanden → `unpair()` nötig, danach stabil |
+| DIS | ✅ `model=OCLEANY3S`, `fw=1.0.0.19`, `hw=Rev.D` |
+| Profilwahl | ✅ `Type-1 (Y3/C3385w0)`, `settings_layout=w0` |
+| **CCCD-Abo** | ❌ **`BleakGATTProtocolError: (3, 'GATT Protocol Error: Write Not Permitted')`** für `…bb86` **und** `…bb90` |
+| Kommando `0303` | gesendet, **keine** Antwort innerhalb von 5 s → Sequenz abgebrochen |
+| Batterie (2A19, 3× gelesen) | **1 %** |
+| Zustand danach | ✅ Bürste weiterhin ansprechbar, **kein** Hänger |
+
+**Bewertung.** ATT-Fehlercode `0x03` (Write Not Permitted) kommt **vom Gerät** –
+es lehnt den Descriptor-Schreibzugriff aktiv ab. Zwei Hypothesen:
+
+1. **Akku bei 1 %**: Das Gerät verweigert das Aktivieren von Notifications im
+   Energiesparmodus. Dafür spricht, dass der Nutzer Hänger bisher genau beim
+   Leerlaufen des Akkus beobachtet hat und die Bürste hier sonst normal antwortet.
+2. **Fehlende Kopplung**: ATT 0x03 wird von manchen Peripheriegeräten auch
+   zurückgegeben, wenn ein Schreibzugriff eine verschlüsselte Verbindung
+   voraussetzt. Die Kopplung wurde in diesem Lauf bewusst entfernt.
+
+**Nicht unterscheidbar**, solange der Akku leer ist. Nächster Schritt: Akku
+laden und erneut messen; erst wenn das CCCD-Abo dann weiterhin scheitert, ist
+Hypothese 2 zu prüfen (Kopplung) — das wäre ein Eingriff, der mit dem Nutzer
+abzustimmen ist, weil er SMP auf dem Gerät auslöst.
+
+**Positiv:** Die neue, getaktete Sequenz hat die Bürste **nicht** in einen Hänger
+gebracht – der Abbruch nach der ersten ausbleibenden Antwort funktionierte wie
+vorgesehen.
+
 ---
 
 ## 3. Befunde ohne Codeänderung (dokumentiert, bewusst nicht geändert)
