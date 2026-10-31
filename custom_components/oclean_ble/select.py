@@ -17,7 +17,7 @@ from .const import (
 )
 from .coordinator import OcleanCoordinator
 from .entity import OcleanEntity
-from .protocol import TYPE1, TYPE_Z1, is_known_model, protocol_for_model
+from .protocol import TYPE1, TYPE1_Y3S, TYPE_Z1, is_known_model, protocol_for_model
 
 # The toothbrush accepts only ONE GATT connection at a time; serialise entity
 # actions so two concurrent writes cannot race for the single BLE slot.
@@ -38,7 +38,7 @@ def _schemes_for_model(
     proto = protocol_for_model(model_id)
     if proto is TYPE1:
         return SCHEMES_BY_MODEL.get(model_id, OCLEANY3M_SCHEMES)
-    if proto is TYPE_Z1:
+    if proto is TYPE_Z1 or proto is TYPE1_Y3S:
         return SCHEMES_BY_MODEL.get(model_id)
     return None
 

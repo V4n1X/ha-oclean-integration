@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### New Features
+
+- **Verified protocol profile for the Oclean X Pro (`OCLEANY3S`).** The model gets its own profile (`TYPE1_Y3S`) built only from frames observed on the wire (HCI captures of the official app 4.0.4 with firmware 1.0.0.19, replayed by an independent client). Every other model keeps the unchanged Type-1 path. Differences to the generic Type-1 poll:
+  - Commands are sent one at a time, each waiting for its reply on `fbb86`, in the official app's order: `030201`, `0201`, `0303`, `0307`, `0202`.
+  - Only `0307` goes to `fbb89`; `030201`, `0303` and `0202` go to `fbb85`. The generic profile writes them to `fbb89`.
+  - `0202` is "clear running data" (it deletes every stored session), not a device-info request. It is sent only after a complete `0307` dump, as the official app does.
+  - `0307` is skipped when `0303` reports no stored sessions, more than 10 stored sessions, or a battery below 3 %. With 32 stored sessions `0307` locked the firmware up until the battery was completely empty; an interrupted dump is never re-sent in the same poll.
+  - The two-part `030201` reply is reassembled to its 34-byte payload, so battery, brush mode and brush-head counters come from the right offsets (head days at 27–28, head uses at 29–30). Battery comes from `0303` byte 3.
+  - Session records: duration is the brushed time (`validDuration`), the timestamp honours the record's own time-zone index, `gestureCode` is byte 18, `gestureArray` has 13 values, coverage uses the brushed time like the app, and records with an unset clock (year 2000) are skipped like the app's error records. The 13 stale bytes after an empty `0307` header are no longer read as a session.
+  - Area reminder, over-pressure protection and the active brush scheme are read back from the brush on every poll.
+- **Clear Stored Sessions button (`OCLEANY3S` only, disabled by default).** Recovery when the brush stores too many sessions to read them safely.
+
+### Changed
+
+- The DIS read now comes before the time calibration in every poll, so a verified profile is known before anything is written. Other models still get the same time-calibration frame as before.
+
 ## [v1.4.0] – 2026-09-19
 
 ### New Features

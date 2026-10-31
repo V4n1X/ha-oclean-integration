@@ -38,12 +38,37 @@ def _make_button(key):
 
 
 class TestButtonDescriptions:
-    def test_three_descriptions_defined(self):
-        assert len(BUTTON_DESCRIPTIONS) == 3
+    def test_four_descriptions_defined(self):
+        assert len(BUTTON_DESCRIPTIONS) == 4
 
     def test_all_keys(self):
         keys = {d.key for d in BUTTON_DESCRIPTIONS}
-        assert keys == {"reset_brush_head", "sync_time", "poll_now"}
+        assert keys == {"reset_brush_head", "sync_time", "poll_now", "clear_stored_sessions"}
+
+    def test_clear_stored_sessions_disabled_by_default(self):
+        desc = next(d for d in BUTTON_DESCRIPTIONS if d.key == "clear_stored_sessions")
+        assert desc.entity_registry_enabled_default is False
+
+
+class TestClearStoredSessionsButton:
+    def test_available_only_on_verified_y3s(self):
+        button, coord = _make_button("clear_stored_sessions")
+        coord.is_verified_y3s = True
+        assert button.available is True
+        coord.is_verified_y3s = False
+        assert button.available is False
+
+    def test_other_buttons_ignore_model(self):
+        button, coord = _make_button("poll_now")
+        coord.is_verified_y3s = False
+        assert button.available is True
+
+    @pytest.mark.asyncio
+    async def test_press_clears_sessions(self):
+        button, coord = _make_button("clear_stored_sessions")
+        coord.async_clear_stored_sessions = AsyncMock()
+        await button.async_press()
+        coord.async_clear_stored_sessions.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

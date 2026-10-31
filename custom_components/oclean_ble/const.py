@@ -72,6 +72,83 @@ RESP_UNKNOWN_4B00 = bytes.fromhex("4b00")  # Unknown push on OCLEANY3MH; may be 
 # brushing score (0x3a = 58 in one observed session). The unknown-notification
 # fallback in parser.py detects this pattern and logs it verbosely.
 
+# Oclean GMT offset table in minutes (1-based index = position + 1, 33 entries),
+# from the app's DateUtils.timeZoneArray. The 0201 time frame and every OCLEANY3S
+# session record (byte 17) carry an index into this table. Index 10 is -03:30, so
+# the lower half is not a plain hour offset.
+OCLEAN_TZ_OFFSETS_MIN: tuple[int, ...] = (
+    -720,
+    -660,
+    -600,
+    -540,
+    -480,
+    -420,
+    -360,
+    -300,
+    -240,
+    -210,
+    -180,
+    -120,
+    -60,
+    0,
+    60,
+    120,
+    180,
+    210,
+    240,
+    270,
+    300,
+    330,
+    345,
+    360,
+    390,
+    420,
+    480,
+    540,
+    570,
+    600,
+    660,
+    720,
+    780,
+)
+
+# ---------------------------------------------------------------------------
+# OCLEANY3S (Oclean X Pro) – hardware-verified protocol
+# ---------------------------------------------------------------------------
+# Verified on an Oclean X Pro (DIS model "OCLEANY3S", firmware 1.0.0.19) with HCI
+# captures of the official app (Oclean Care+ 4.0.4) and replays by an own client.
+# Only frames seen on the wire are used; every other model keeps the generic
+# TYPE1 path. Wire format of the replies:
+#   030201 (fbb85) -> two notifies on fbb86: "0302 23 24 <16 B>" + "0302 <18 B>"
+#                     = 34-byte device-info payload (length byte 0x24 - 2)
+#   0201 <time>    -> "0201 4F 4B"
+#   0303 (fbb85)   -> "0303 <status> <mV:2 BE> <battery %> <stored sessions> 00"
+#   0307 (fbb89)   -> fbb90 stream "0307 2A 42 23 <count:2 BE>" + count x 42 bytes,
+#                     20-byte notifies, last one padded with stale buffer bytes
+#   0202 (fbb85)   -> "0202 4F 4B" — deletes ALL sessions stored on the brush
+# A command the firmware does not support is answered with a lone 0x02.
+CMD_Y3S_DEVICE_INFO = bytes.fromhex("030201")
+RESP_Y3S_UNSUPPORTED = b"\x02"
+CMD_Y3S_BATTERY = bytes.fromhex("0303")
+CMD_Y3S_RUNNING_DATA = bytes.fromhex("0307")
+CMD_Y3S_CLEAR_RUNNING_DATA = bytes.fromhex("0202")
+Y3S_ACK_SUFFIX = b"OK"
+Y3S_DEVICE_INFO_LEN = 34
+Y3S_RECORD_SIZE = 42
+# 0307 locked the firmware up (no link, no advertising until the battery was
+# completely empty) while the brush stored 32 sessions; dumps of 0-2 sessions
+# were always fine. 0303 reports the number of stored sessions, so the dump is
+# skipped above this limit. The limit is a safety margin, not a measured value.
+Y3S_MAX_SAFE_STORED_SESSIONS = 10
+# At 0-2 % battery the brush was hardly connectable and dropped links; no dump then.
+Y3S_MIN_BATTERY_FOR_DUMP = 3
+# The official app files records with an implausible date (year < 2017, e.g. after
+# the clock was lost in a full discharge) as error records and does not show them.
+Y3S_MIN_RECORD_YEAR = 2017
+# Timeout for one command's reply on fbb86 and for a silent gap inside the 0307 stream.
+Y3S_REPLY_TIMEOUT = 5.0
+Y3S_STREAM_IDLE_TIMEOUT = 3.0
+
 # Config entry keys
 CONF_MAC_ADDRESS = "mac_address"
 CONF_POLL_INTERVAL = "poll_interval"

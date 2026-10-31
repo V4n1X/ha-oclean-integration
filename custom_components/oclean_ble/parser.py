@@ -30,6 +30,7 @@ from .const import (
     DATA_LAST_BRUSH_PRESSURE_RATIO,
     DATA_LAST_BRUSH_SCORE,
     DATA_LAST_BRUSH_TIME,
+    OCLEAN_TZ_OFFSETS_MIN,
     RESP_BRUSH_AREAS_T1,
     RESP_BRUSH_AREAS_Y3P,
     RESP_DEVICE_INFO,
@@ -45,6 +46,9 @@ from .const import (
     RESP_UNKNOWN_4B00,
     RESP_UNKNOWN_5400,
     TOOTH_AREA_NAMES,
+    Y3S_DEVICE_INFO_LEN,
+    Y3S_MIN_RECORD_YEAR,
+    Y3S_RECORD_SIZE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1627,3 +1631,210 @@ def parse_battery(data: bytes) -> int | None:
         return level
     _LOGGER.warning("Oclean unexpected battery value: %d", level)
     return None
+
+
+# ---------------------------------------------------------------------------
+# OCLEANY3S (Oclean X Pro) – hardware-verified frames
+# ---------------------------------------------------------------------------
+# Layouts verified on an Oclean X Pro (firmware 1.0.0.19) against HCI captures of
+# the official app and its SDK class for this model. Used only by the TYPE1_Y3S
+# poll flow; the generic TYPE1 parsers above are untouched.
+
+# Keys of parse_y3s_device_info() results that are not sensor data (DATA_*).
+Y3S_INFO_ACTIVE_PNUM = "y3s_active_pnum"
+Y3S_INFO_OVER_PRESSURE = "y3s_over_pressure"
+Y3S_INFO_AREA_REMIND = "y3s_area_remind"
+Y3S_INFO_HEAD_USED_MINUTES = "y3s_head_used_minutes"
+Y3S_INFO_HEAD_MAX_TIME = "y3s_head_max_time"
+Y3S_INFO_LANGUAGE = "y3s_language"
+# Keys of parse_y3s_battery() results that are not sensor data.
+Y3S_BATTERY_ON_CHARGER = "y3s_on_charger"
+Y3S_BATTERY_VOLTAGE_MV = "y3s_voltage_mv"
+Y3S_BATTERY_STORED_SESSIONS = "y3s_stored_sessions"
+
+_Y3S_STREAM_HEADER = b"\x03\x07*B#"
+_Y3S_STREAM_HEADER_LEN = len(_Y3S_STREAM_HEADER) + 2  # + record count (2 bytes BE)
+
+
+def _be16(data: bytes, offset: int) -> int:
+    return (data[offset] << 8) | data[offset + 1]
+
+
+def parse_y3s_device_info(payload: bytes) -> dict[str, Any]:
+    """Parse the reassembled 34-byte OCLEANY3S device-info payload (reply to 030201).
+
+    Offsets (verified on hardware; the official app's SDK reads the same fields):
+      11     active plan number (pNum) – what the last 0206 wrote
+      12     brush mode – the byte 0209 writes (00/01 = on, 0xEC = off)
+      14-15  brush-head used time, BE, accumulated whole minutes
+      16-21  device clock YY MM DD hh mm ss
+      22     over-pressure protection (0/1)
+      23     area (zone change) reminder (0/1)
+      24     device time-zone index
+      25-26  headMaxTimeLong, BE – the value 0217 writes; the brush does not act on it
+      27-28  brush-head days in use, BE
+      29-30  brush-head uses (sessions since the last head reset), BE
+      31     display language index
+    """
+    if len(payload) < Y3S_DEVICE_INFO_LEN:
+        _LOGGER.debug("Oclean Y3S device info too short (%d bytes): %s", len(payload), payload.hex())
+        return {}
+    result = {
+        DATA_BRUSH_MODE: payload[12],
+        DATA_BRUSH_HEAD_DAYS: _be16(payload, 27),
+        DATA_BRUSH_HEAD_USAGE: _be16(payload, 29),
+        Y3S_INFO_ACTIVE_PNUM: payload[11],
+        Y3S_INFO_OVER_PRESSURE: bool(payload[22]),
+        Y3S_INFO_AREA_REMIND: bool(payload[23]),
+        Y3S_INFO_HEAD_USED_MINUTES: _be16(payload, 14),
+        Y3S_INFO_HEAD_MAX_TIME: _be16(payload, 25),
+        Y3S_INFO_LANGUAGE: payload[31],
+    }
+    _LOGGER.debug("Oclean Y3S device info: %s (raw: %s)", result, payload.hex())
+    return result
+
+
+def parse_y3s_battery(payload: bytes) -> dict[str, Any]:
+    """Parse an OCLEANY3S 0303 reply payload (bytes after the 0303 prefix).
+
+    Layout (verified on hardware):
+      0     charge state: 1 = on the charger, 2 = off the charger
+      1-2   cell voltage in mV, BE
+      3     battery level in % (identical to 0x2A19)
+      4     number of sessions stored on the brush (matched the following 0307 dump)
+      5     always 0
+    """
+    if len(payload) < 5:
+        _LOGGER.debug("Oclean Y3S 0303 reply too short: %s", payload.hex())
+        return {}
+    result: dict[str, Any] = {
+        Y3S_BATTERY_ON_CHARGER: payload[0] == 1,
+        Y3S_BATTERY_VOLTAGE_MV: _be16(payload, 1),
+        Y3S_BATTERY_STORED_SESSIONS: payload[4],
+    }
+    if 0 <= payload[3] <= 100:
+        result[DATA_BATTERY] = payload[3]
+    _LOGGER.debug("Oclean Y3S 0303: %s (raw: %s)", result, payload.hex())
+    return result
+
+
+def _y3s_record_timestamp(record: bytes) -> int | None:
+    """UTC timestamp of a record's start time, using its own time-zone index (byte 17)."""
+    year = _YEAR_2000 + record[0]
+    if year < Y3S_MIN_RECORD_YEAR or year > datetime.datetime.now().year + 1:
+        return None
+    try:
+        local = datetime.datetime(year, record[1], record[2], record[3], record[4], record[5])
+    except ValueError:
+        return None
+    tz_index = record[17]
+    if 1 <= tz_index <= len(OCLEAN_TZ_OFFSETS_MIN):
+        offset = datetime.timedelta(minutes=OCLEAN_TZ_OFFSETS_MIN[tz_index - 1])
+        return int(calendar.timegm((local - offset).timetuple()))
+    return int(time.mktime(local.timetuple()))
+
+
+def parse_y3s_record(record: bytes) -> dict[str, Any]:
+    """Parse one 42-byte OCLEANY3S session record from the 0307 dump.
+
+    Layout (verified on hardware with controlled sessions):
+      0-5    start time YY MM DD hh mm ss (local time of the brush)
+      6      pNum (plan number)
+      7-8    duration of the plan in s, BE
+      9-10   validDuration in s, BE – the brushing time the official app stores
+      11-15  pressureRatio: % of the time in pressure levels 0-4 (2 = proper pressure)
+      16     not used
+      17     time-zone index (OCLEAN_TZ_OFFSETS_MIN)
+      18     gestureCode (also value 0 of gestureArray)
+      19-22  quadrant shares in %
+      23-30  zone shares in % in TOOTH_AREA_NAMES order
+      18-30  gestureArray (13 values, as the app stores it)
+      30-32  powerArray, 12 x 2 bit
+      33     score – the value the brush shows on its display
+      34     points (0 on this model)
+      35-41  0xFF filler
+
+    Returns {} for records with an implausible date; the official app files those
+    as error records and does not show them either.
+    """
+    if len(record) < Y3S_RECORD_SIZE:
+        _LOGGER.debug("Oclean Y3S record too short (%d bytes): %s", len(record), record.hex())
+        return {}
+    timestamp = _y3s_record_timestamp(record)
+    if timestamp is None:
+        _LOGGER.debug("Oclean Y3S record with implausible date skipped: %s", record[:Y3S_RECORD_SIZE].hex())
+        return {}
+
+    scheduled_s = _be16(record, 7)
+    valid_s = _be16(record, 9)
+    pressure_ratio = list(record[11:16])
+    result: dict[str, Any] = {
+        DATA_LAST_BRUSH_TIME: timestamp,
+        DATA_LAST_BRUSH_PNUM: record[6],
+        DATA_LAST_BRUSH_DURATION: valid_s,
+        DATA_LAST_BRUSH_DURATION_SCHEDULED: scheduled_s,
+        DATA_LAST_BRUSH_PRESSURE_RATIO: pressure_ratio,
+        DATA_LAST_BRUSH_PRESSURE_CODE: _pressure_code(pressure_ratio),
+        DATA_LAST_BRUSH_GESTURE_CODE: record[18],
+        DATA_LAST_BRUSH_GESTURE_ARRAY: list(record[18:31]),
+        DATA_LAST_BRUSH_POWER_ARRAY: (
+            _extract_nibbles(record[30]) + _extract_nibbles(record[31]) + _extract_nibbles(record[32])
+        ),
+    }
+    score = record[33]
+    if 0 < score <= 100:
+        result[DATA_LAST_BRUSH_SCORE] = score
+
+    # The app converts zone shares into seconds (share x validDuration / sum of
+    # shares) and counts a zone as cleaned at >= 9 s.
+    area_bytes = bytes(record[23:31])
+    if any(area_bytes):
+        share = AREA_COVERAGE_NORM_THRESHOLD / valid_s if valid_s > 0 else None
+        area_dict, _cleaned, _avg, coverage_pct = _build_area_stats(area_bytes, share_threshold=share)
+        result[DATA_LAST_BRUSH_AREAS] = area_dict
+        if share is not None:
+            result[DATA_LAST_BRUSH_COVERAGE] = coverage_pct
+
+    _LOGGER.debug("Oclean Y3S record: %s (raw: %s)", result, record[:Y3S_RECORD_SIZE].hex())
+    return result
+
+
+class Y3sRunningDataStream:
+    """Reassembler for the OCLEANY3S 0307 dump on fbb90.
+
+    The first notification starts with ``0307 2A 42 23 <count:2 BE>``; record
+    bytes follow directly (no size byte) and continue in the next notifications.
+    Everything after ``count x 42`` bytes is stale buffer content and ignored.
+    """
+
+    def __init__(self) -> None:
+        self.count: int | None = None
+        self._buf = bytearray()
+
+    def feed(self, data: bytes) -> None:
+        """Add one notification; data before the header is ignored."""
+        if self.count is None:
+            if len(data) < _Y3S_STREAM_HEADER_LEN or not data.startswith(_Y3S_STREAM_HEADER):
+                _LOGGER.debug("Oclean Y3S stream: ignoring notification before header: %s", data.hex())
+                return
+            self.count = _be16(data, len(_Y3S_STREAM_HEADER))
+            self._buf.extend(data[_Y3S_STREAM_HEADER_LEN:])
+            return
+        self._buf.extend(data)
+
+    @property
+    def expected_bytes(self) -> int:
+        return (self.count or 0) * Y3S_RECORD_SIZE
+
+    @property
+    def received_bytes(self) -> int:
+        return min(len(self._buf), self.expected_bytes)
+
+    @property
+    def complete(self) -> bool:
+        return self.count is not None and len(self._buf) >= self.expected_bytes
+
+    def records(self) -> list[bytes]:
+        """Return all complete 42-byte records received so far."""
+        usable = self.received_bytes - self.received_bytes % Y3S_RECORD_SIZE
+        return [bytes(self._buf[i : i + Y3S_RECORD_SIZE]) for i in range(0, usable, Y3S_RECORD_SIZE)]

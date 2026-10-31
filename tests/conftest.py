@@ -359,10 +359,11 @@ def _install_ha_stubs() -> None:
     btn = _stub("homeassistant.components.button")
 
     class ButtonEntityDescription:
-        def __init__(self, *, key, name="", icon=None, **kwargs):
+        def __init__(self, *, key, name="", icon=None, entity_registry_enabled_default=True, **kwargs):
             self.key = key
             self.name = name
             self.icon = icon
+            self.entity_registry_enabled_default = entity_registry_enabled_default
 
     class ButtonEntity:
         pass

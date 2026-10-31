@@ -53,6 +53,9 @@
       },
       "poll_now": {
         "name": "Actualizar ahora"
+      },
+      "clear_stored_sessions": {
+        "name": "Borrar sesiones almacenadas"
       }
     },
     "select": {

@@ -44,6 +44,10 @@ class DeviceProtocol:
                              payload (Type-1 / Type-Z1 format, mo5292L in APK).  False
                              uses the 020E + 4-byte big-endian Unix timestamp (Type-0
                              default).
+        verified_y3s_flow:   True selects the hardware-verified OCLEANY3S poll
+                             (one command at a time, each reply awaited; see
+                             ``OcleanCoordinator._run_y3s_queries``).  query_commands
+                             is not used then.
     """
 
     name: str
@@ -52,6 +56,7 @@ class DeviceProtocol:
     supports_pagination: bool
     write_char: str = WRITE_CHAR_UUID
     uses_t1_calibration: bool = False
+    verified_y3s_flow: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +93,26 @@ TYPE1 = DeviceProtocol(
     # Only the 0307 query command uses f12582C = fbb89.
     write_char=WRITE_CHAR_UUID,
     uses_t1_calibration=True,
+)
+
+#: Type-1 Y3S – Oclean X Pro / OCLEANY3S, verified on hardware (firmware 1.0.0.19).
+#: Differs from TYPE1 in what was observed on the wire (HCI captures of the official
+#: app plus replays by an own client):
+#:   * only 0307 goes to fbb89; 030201, 0201, 0303 and 0202 go to fbb85,
+#:   * 0202 is "clear running data" – it deletes every stored session and is only
+#:     sent after a complete 0307 dump (as the official app does),
+#:   * every command waits for its reply on fbb86 before the next one is written,
+#:   * 0307 is skipped when 0303 reports an empty store, a store above
+#:     Y3S_MAX_SAFE_STORED_SESSIONS (firmware lock-up) or a nearly empty battery.
+#: fbb86 and fbb90 have no CCCD and notify anyway.
+TYPE1_Y3S = DeviceProtocol(
+    name="Type-1 (Y3S, verified)",
+    notify_chars=(READ_NOTIFY_CHAR_UUID, RECEIVE_BRUSH_UUID),
+    query_commands=(),
+    supports_pagination=False,
+    write_char=WRITE_CHAR_UUID,
+    uses_t1_calibration=True,
+    verified_y3s_flow=True,
 )
 
 #: Type-Z1 – Oclean Z1 / OCLEANY5
@@ -199,7 +224,7 @@ _MODEL_MAP: dict[str, DeviceProtocol] = {
     # The response uses the same *B# multi-packet format as OCLEANY3P.
     # ------------------------------------------------------------------
     "OCLEANY3": TYPE1,  # Oclean X Pro          – corrected (logs 2026-03-10, issue #49)
-    "OCLEANY3S": TYPE1,  # Oclean X Pro (S)      – APK DeviceType 9
+    "OCLEANY3S": TYPE1_Y3S,  # Oclean X Pro (S)  – verified on hardware, fw 1.0.0.19
     "OCLEANY3T": TYPE1,  # Oclean X Pro (T)      – APK DeviceType 10
     # ------------------------------------------------------------------
     # Type-Z1 – Oclean Z1 / OCLEANY5
