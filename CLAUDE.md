@@ -181,6 +181,10 @@ Areas are parsed from record bytes 23-30 (the APK `gestureArray` field) by **all
 
 **OCLEANA1** (Oclean Air 1): fbb86 characteristic exists but has no CCCD → cannot subscribe for notifications. Coordinator uses direct `read_gatt_char()` fallback after sending query commands.
 
+**Notify characteristics without a CCCD through an ESPHome proxy (issue #102).** bleak-esphome registers the subscription on the proxy and *then* writes the CCCD itself; with the injected placeholder descriptor (handle 0xFFFE) that write fails with `Invalid handle` and bleak-esphome removes the registration again, so nothing is ever delivered. `_try_subscribe_no_cccd_via_proxy()` therefore calls `backend._client.bluetooth_gatt_start_notify()` directly and stores the (stop, abort) pair in `backend._notify_cancels`. Only `err_is_invalid_handle()` (message contains `Invalid handle` **and** `handle=65534`) takes this path; a real stale handle keeps the retry logic.
+
+**Identified model is pinned.** `_identified_model` is set on the first successful DIS model read and persisted (`identified_model` in the store). A later failed DIS read reuses it instead of selecting `UNKNOWN`, whose command set (`0202`, unguarded `0307`) must never reach an `OCLEANY3S`.
+
 ### OCLEANY3P APK References
 - `apk/oclean-project/sources/p352w/C5733b.java` – multi-packet reassembly for 0307 (header: "0307*B#" + RecordCount[2B] + RecordLen[1-2B] + data)
 - `apk/oclean-project/sources/p105g/C3376s.java` – Type-1 protocol handler
