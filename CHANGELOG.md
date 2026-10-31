@@ -21,6 +21,11 @@
 - **Actions use the right profile right after a restart.** Before the first poll, Sync Time sent the generic `020E` frame; it now sends the verified `0201` frame.
 - **Brushing Reminder, Auto Power-Off Timer and Brush Head Lifetime are unavailable.** The brush has no reminder or power-off setting (`0239`/`0240` are not implemented for this model), and `0217` stores a value the brush ignores rather than a lifetime in days.
 
+### Fixes
+
+- **Notifications work again through an ESPHome BLE proxy (issue #102).** On connections through a proxy, a notify characteristic without a CCCD (`fbb86`/`fbb90` on the Oclean X Pro, `fbb86` on other models) failed with `handle=65534 … Invalid handle`. bleak-esphome registers the subscription on the proxy first and then writes the CCCD itself; since no CCCD exists, that write failed and bleak-esphome removed the registration again, so no reply ever arrived and a poll only produced an empty session list and a battery value. The integration now registers the subscription directly on the proxy in that case, without a descriptor write. A real stale handle is not affected (only the injected placeholder handle 0xFFFE is treated as "no CCCD").
+- **The model is remembered once it has been identified.** A failed DIS read could select the generic discovery profile again – after a restart, or later when the model characteristic fails while HW/SW read fine. The identified model ID is now pinned and persisted, so the generic profile (with its `0202` and unguarded `0307`) is only ever used before the first successful identification.
+
 ### Changed
 
 - The DIS read now comes before the time calibration in every poll, so a verified profile is known before anything is written. Other models still get the same time-calibration frame as before.

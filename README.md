@@ -289,6 +289,8 @@ Why the limits: with 32 stored sessions, `0307` locked the brush's firmware up â
 
 Because the store is cleared after every sync, a session is read either by Home Assistant or by the official app, whichever syncs first.
 
+With an ESPHome BLE proxy the brush's notify characteristics work too: they have no CCCD descriptor, and the integration subscribes on the proxy without one instead of failing on the descriptor write (this was the cause of empty session lists in issue #102).
+
 ---
 
 ## Roadmap
