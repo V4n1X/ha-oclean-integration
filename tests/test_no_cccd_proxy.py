@@ -163,19 +163,14 @@ class TestIssue102Poll:
     async def test_poll_receives_data_through_the_proxy_path(self):
         from tests.integration_helpers import run_poll
 
+        base = OcleanDeviceSimulator().with_battery(8).build_client()
         client = FakeProxyClient()
-        simulator = OcleanDeviceSimulator().with_battery(8)
-        base = simulator.build_client()
-        # Keep the listener from the simulator, but fail the descriptor write the
-        # way the ESPHome proxy does and deliver the captured notifications.
+        # The proxy fails the descriptor write exactly as in the issue; DIS and the
+        # battery read work (the log shows them succeeding).
         client.start_notify = AsyncMock(side_effect=BleakError(_INVALID_HANDLE))
         client.read_gatt_char = base.read_gatt_char
         client.write_gatt_char = base.write_gatt_char
         coordinator = _make_coordinator()
-
-        def _deliver(_uuid, callback):
-            # The proxy callback receives (handle, data); the coordinator wraps it.
-            pass
 
         result = await run_poll(coordinator, client)
 
