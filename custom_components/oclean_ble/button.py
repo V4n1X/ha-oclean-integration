@@ -31,6 +31,14 @@ BUTTON_DESCRIPTIONS: tuple[ButtonEntityDescription, ...] = (
         name="Update Now",
         icon="mdi:refresh",
     ),
+    # OCLEANY3S only: recovery when the brush stores too many sessions to read
+    # them safely. Disabled by default; unavailable on every other model.
+    ButtonEntityDescription(
+        key="clear_stored_sessions",
+        name="Clear Stored Sessions",
+        icon="mdi:delete-sweep",
+        entity_registry_enabled_default=False,
+    ),
 )
 
 
@@ -60,6 +68,12 @@ class OcleanButton(OcleanEntity, ButtonEntity):
         super().__init__(coordinator, mac, device_name, description.key)
         self.entity_description = description
 
+    @property
+    def available(self) -> bool:
+        if self.entity_description.key == "clear_stored_sessions":
+            return super().available and self.coordinator.is_verified_y3s
+        return super().available
+
     async def async_press(self) -> None:
         """Handle button press."""
         if self.entity_description.key == "reset_brush_head":
@@ -68,3 +82,5 @@ class OcleanButton(OcleanEntity, ButtonEntity):
             await self.coordinator.async_sync_time()
         elif self.entity_description.key == "poll_now":
             await self.coordinator.async_poll_now()
+        elif self.entity_description.key == "clear_stored_sessions":
+            await self.coordinator.async_clear_stored_sessions()

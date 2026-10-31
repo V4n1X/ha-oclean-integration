@@ -53,6 +53,9 @@
       },
       "poll_now": {
         "name": "Jetzt aktualisieren"
+      },
+      "clear_stored_sessions": {
+        "name": "Gespeicherte Putzvorgänge löschen"
       }
     },
     "select": {

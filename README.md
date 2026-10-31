@@ -16,7 +16,7 @@ Custom integration for **Oclean Smart Toothbrushes** (Oclean X, X Pro, X Pro Eli
 Connects every 5 minutes via Bluetooth, reads brushing data, then disconnects.
 No cloud, no account, fully local.
 
-> **Devices tested:** Oclean X (OCLEANY3M) · Oclean X HW variant (OCLEANY3MH) · Oclean X Pro (OCLEANY3) · Oclean X Pro Elite (OCLEANY3P) · Oclean X Pro 20 (OCLEANX20) · Oclean X Ultra (OCLEANV1a) · Oclean Z1 (OCLEANY5) · Oclean Air 1 (OCLEANA1)
+> **Devices tested:** Oclean X (OCLEANY3M) · Oclean X HW variant (OCLEANY3MH) · Oclean X Pro (OCLEANY3) · Oclean X Pro (OCLEANY3S) · Oclean X Pro Elite (OCLEANY3P) · Oclean X Pro 20 (OCLEANX20) · Oclean X Ultra (OCLEANV1a) · Oclean Z1 (OCLEANY5) · Oclean Air 1 (OCLEANA1)
 > **Protocol:** Reverse-engineered from the official Oclean APK
 
 ---
@@ -114,6 +114,7 @@ Entity IDs follow the pattern `<platform>.<device_name>_<suffix>` where `<device
 | Reset Brush Head | `_reset_brush_head` | Resets the brush head wear counter on the device (CMD 020F) and clears the local session counter | ⚠️ Unconfirmed |
 | Sync Time | `_sync_time` | Synchronises the current time to the device clock | ✅ Tested |
 | Update Now | `_update_now` | Triggers an immediate BLE poll (same as the `oclean_ble.poll` action) | ✅ Tested |
+| Clear Stored Sessions | `_clear_stored_sessions` | Oclean X Pro (OCLEANY3S) only, disabled by default: deletes all sessions stored on the brush (CMD 0202). Recovery when the brush stores too many sessions to read them safely | ✅ Frame verified on hardware |
 
 **Legend:**
 - ✅ **Tested** – confirmed working on real hardware with multiple sessions
@@ -252,6 +253,7 @@ Unknown notification types are logged as hex – this helps extend the parser.
 | Oclean X | OCLEANY3M | ✅ Tested | Battery, score, timestamp, duration, and scheme ID confirmed. Extended fields (areas, pressure) not supported by this device. |
 | Oclean X (HW variant) | OCLEANY3MH | ✅ Tested | Score, timestamp, duration, and pNum confirmed via `XX03` notification format (issue #19). |
 | Oclean X Pro | OCLEANY3 | ⚠️ Partial | Session data fetched via `0307` + `*B#` multi-packet reassembly; implementation complete but needs real-device confirmation. |
+| Oclean X Pro (S) | OCLEANY3S | ✅ Protocol verified | Own protocol profile; every frame verified on firmware 1.0.0.19 against HCI captures of the official app – see [Oclean X Pro (OCLEANY3S)](#oclean-x-pro-ocleany3s) below. |
 | Oclean X Pro Elite | OCLEANY3P | ⚠️ Partial | Session metadata via `5100`, tooth areas via `021f`; implementation complete, full field confirmation pending. |
 | Oclean X Pro 20 | OCLEANX20 | ⚠️ Partial | Extended-offset inline `0307` format; timestamp and duration confirmed, further field testing pending. |
 | Oclean Z1 | OCLEANY5 | ⚠️ Partial | Type-Z1 protocol (APK handler C3350f mode=1): 0303/0202/0302 via fbb85, 0307 via fbb89, notify on fbb86+fbb90. Time calibration uses 0201 + 8-byte datetime format. Implementation complete (issue #69), real-device confirmation pending. |
@@ -266,6 +268,22 @@ Unknown notification types are logged as hex – this helps extend the parser.
 > If brush session detail fields (areas, pressure, scheme) are missing or the timestamp looks wrong, enable debug logging, brush your teeth, and open an issue with the raw hex output from the HA log.
 
 > If your device is not listed, enable debug logging and open an issue with the raw hex output. This is how Oclean X support was developed.
+
+### Oclean X Pro (OCLEANY3S)
+
+The `OCLEANY3S` has its own protocol profile. Every frame it uses was observed on the wire (HCI captures of the official Oclean app talking to a brush with firmware 1.0.0.19) and replayed by an independent client; other models are not affected by it.
+
+A poll mirrors the official app, one command at a time, each waiting for its reply:
+
+1. `030201` – device info: brush mode, brush-head days and uses, and the current state of the area reminder, over-pressure protection and active brush scheme (these entities are read back from the brush instead of being assumed).
+2. `0201` – time sync.
+3. `0303` – battery level and the number of sessions stored on the brush.
+4. `0307` (on `fbb89`) – the stored sessions, only when the brush reports at least one, at most 10, and the battery is at 3 % or more.
+5. `0202` – after a **complete** dump the brush's session store is cleared, exactly as the official app does. Without it the store keeps growing.
+
+Why the limits: with 32 stored sessions, `0307` locked the brush's firmware up – no connection and no advertising until the battery was completely empty. Small stores were always read fine. If the brush reports more than 10 stored sessions (e.g. after weeks without any sync), the integration logs a warning and does not read them. Enable the **Clear Stored Sessions** button (disabled by default, only available on this model) and press it once; this deletes the stored sessions on the brush, and new sessions are read normally afterwards.
+
+Because the store is cleared after every sync, a session is read either by Home Assistant or by the official app, whichever syncs first.
 
 ---
 
