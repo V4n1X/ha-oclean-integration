@@ -147,6 +147,80 @@ async def _clear_cccd(client: BleakClient, char_uuid: str) -> None:
         pass
 
 
+def err_is_invalid_handle(err: BaseException) -> bool:
+    """True for the descriptor error bleak-esphome raises without a real CCCD.
+
+    Message form: "Bluetooth GATT Error address=… handle=65534 error=1
+    description=Invalid handle". 0xFFFE is the handle of the placeholder
+    descriptor this integration injects, so the error means "no CCCD on the
+    device", not a broken link.
+    """
+    text = str(err)
+    return "Invalid handle" in text and "handle=65534" in text
+
+
+async def _try_subscribe_no_cccd_via_proxy(  # noqa: PLR0911 - one exit per failure mode
+    client: BleakClient,
+    char_uuid: str,
+    handler: Callable[[Any, bytearray], None],
+    log: logging.Logger | logging.LoggerAdapter[Any],
+) -> bool:
+    """Subscribe without any CCCD write on an ESPHome BLE proxy connection.
+
+    bleak-esphome enables notifications in two steps: it registers them on the
+    proxy, then writes the CCCD descriptor itself. Oclean notify characteristics
+    without a CCCD (fbb86/fbb90) make the second step fail with "Invalid handle"
+    because the injected placeholder descriptor has no real handle - and bleak-esphome
+    then removes the registration again, so no reply ever arrives.
+
+    Here the registration is made directly on the proxy, exactly as bleak-esphome
+    would do it, but without the descriptor write. The proxy accepted this
+    registration before the CCCD write in every reported case, so the brush's
+    notifications do arrive. Returns False when the client is not a proxy
+    connection or the registration fails.
+    """
+    backend = getattr(client, "_backend", None)
+    api = getattr(backend, "_client", None)
+    address = getattr(backend, "_address_as_int", None)
+    services = getattr(client, "services", None)
+    start_notify = getattr(api, "bluetooth_gatt_start_notify", None)
+    if start_notify is None or address is None or services is None:
+        return False
+    try:
+        char = services.get_characteristic(char_uuid)
+    except Exception:  # noqa: BLE001
+        return False
+    if char is None:
+        return False
+    properties = set(getattr(char, "properties", ()) or ())
+    if not properties & {"notify", "indicate"}:
+        return False
+    cancels = getattr(backend, "_notify_cancels", None)
+    if isinstance(cancels, dict) and char.handle in cancels:
+        log.debug("%s is already subscribed on the proxy", char_uuid)
+        return True
+    try:
+        cancel = await start_notify(
+            address,
+            char.handle,
+            lambda _handle, data: handler(char, data),
+        )
+    except Exception as err:  # noqa: BLE001
+        log.debug(
+            "proxy-side subscribe for %s also failed: %s (%s)",
+            char_uuid,
+            err,
+            type(err).__name__,
+        )
+        return False
+    # bleak-esphome expects a (stop, abort) pair per handle; only store a value it
+    # can handle, otherwise the connection teardown would break on it.
+    if isinstance(cancels, dict) and isinstance(cancel, tuple) and len(cancel) == 2:
+        cancels[char.handle] = cancel
+    log.debug("subscribed to %s on the proxy without a CCCD write", char_uuid)
+    return True
+
+
 async def _try_subscribe_no_cccd(
     client: BleakClient,
     char_uuid: str,
@@ -553,6 +627,9 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         # DIS values (model, firmware, hw revision) are stable but could change
         # after a firmware update, so we re-read them every 24 hours.
         self._dis_last_read_ts: float = 0.0
+        # Model ID once identified (persisted), so a later failed DIS read cannot
+        # fall back to the generic UNKNOWN profile.
+        self._identified_model: str | None = None
 
         # Smart polling: optional time windows + post-brush cooldown.
         self._poll_windows: list[tuple[_dtime, _dtime]] = _parse_poll_windows(poll_windows)
@@ -1062,6 +1139,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
             self._brush_head_max_days = stored.get("brush_head_max_days")
             self._brush_head_sw_count = stored.get("brush_head_sw_count", 0)
             self._active_scheme_pnum = stored.get("active_scheme_pnum")
+            self._identified_model = stored.get("identified_model")
             last_session = stored.get("last_session", {})
             if last_session:
                 self._last_raw.update(last_session)
@@ -1086,6 +1164,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                 "brush_head_max_days": self._brush_head_max_days,
                 "brush_head_sw_count": self._brush_head_sw_count,
                 "active_scheme_pnum": self._active_scheme_pnum,
+                "identified_model": self._identified_model,
                 "last_session": last_session,
             }
         )
@@ -1225,7 +1304,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         collected: dict[str, Any],
     ) -> list[dict[str, Any]]:
         """Perform GATT operations and return all fetched brush session records."""
-        cached_model = self._last_raw.get(DATA_MODEL_ID)
+        cached_model = self._last_raw.get(DATA_MODEL_ID) or self._identified_model
         self._protocol = protocol_for_model(cached_model)
         self._log.debug(
             "poll start: mac=%s ts=%d protocol=%s (model=%s)",
@@ -1725,8 +1804,16 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         if got_fresh_model:
             self._dis_last_read_ts = time.time()
 
-        # Update protocol profile based on the freshly read model ID.
+        # Update protocol profile based on the freshly read model ID. A model that
+        # was identified once stays authoritative: without this, one failed DIS
+        # read (or a restart where the first read fails) selects UNKNOWN, whose
+        # command set is the generic discovery profile - on the OCLEANY3S that
+        # means 0202 and an unguarded 0307.
         model_id = collected.get(DATA_MODEL_ID)
+        if model_id:
+            self._identified_model = model_id
+        elif self._identified_model:
+            collected[DATA_MODEL_ID] = model_id = self._identified_model
         new_protocol = protocol_for_model(model_id)
         if new_protocol is not self._protocol:
             self._log.debug(
@@ -1899,9 +1986,16 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                         )
                 else:
                     is_no_cccd = "does not have a characteristic client config descriptor" in str(err)
-                    if is_no_cccd:
-                        self._log.debug("no CCCD on %s – trying no-CCCD subscribe path", char_uuid)
+                    # bleak-esphome reports the same situation as "Invalid handle"
+                    # on the descriptor it writes after registering the proxy side.
+                    if is_no_cccd or err_is_invalid_handle(err):
+                        self._log.debug("no usable CCCD on %s - trying no-CCCD subscribe path", char_uuid)
                         if await _try_subscribe_no_cccd(
+                            client,
+                            char_uuid,
+                            handler,
+                            self._log,
+                        ) or await _try_subscribe_no_cccd_via_proxy(
                             client,
                             char_uuid,
                             handler,
