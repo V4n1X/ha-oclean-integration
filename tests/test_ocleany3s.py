@@ -71,6 +71,14 @@ DUMP_TWO_RECORDS = [
     bytes.fromhex("00005300ffffffffffffff000105120901000078"),
 ]
 DUMP_EMPTY = [bytes.fromhex("03072a422300001a0a1f06171800007800780807")]
+# Setting commands and the bytes the brush puts between the echo and "OK" (snoop16/18).
+SETTING_ACKS = {
+    b"\x02\x06": lambda _d: b"",
+    b"\x02\x0b": lambda _d: b"",
+    b"\x02\x0f": lambda _d: b"",
+    b"\x02\x0d": lambda d: d[2:3] + b"\x1e",
+    b"\x02\x12": lambda d: d[2:3],
+}
 
 
 def _records_from(packets: list[bytes]) -> list[bytes]:
@@ -322,6 +330,8 @@ class FakeY3s:
         elif uuid == WRITE_CHAR_UUID and data == b"\x02\x02":
             if self.ack_clear:
                 self._notify(READ_NOTIFY_CHAR_UUID, CLEAR_ACK)
+        elif uuid == WRITE_CHAR_UUID and data[:2] in SETTING_ACKS:
+            self._notify(READ_NOTIFY_CHAR_UUID, data[:2] + SETTING_ACKS[data[:2]](data) + b"OK")
         else:
             self._notify(READ_NOTIFY_CHAR_UUID, b"\x02")
 
@@ -600,3 +610,158 @@ class TestClearStoredSessions:
         assert _make_coordinator().is_verified_y3s is True
         assert _make_coordinator(cached_model="OCLEANY3P").is_verified_y3s is False
         assert _make_coordinator(cached_model=None).is_verified_y3s is False
+
+
+# ---------------------------------------------------------------------------
+# Entities and write actions on the OCLEANY3S
+# ---------------------------------------------------------------------------
+
+# Frames the official app sent for "Daily standard cleaning" (pnum 0) and, with
+# Bluetooth acceleration off, the split "Medium bleaching" (pnum 76) – snoop16/17.
+STANDARD_PLAN_FRAME = bytes.fromhex("0206000406021e06021e06021e06021e0005")
+BLEACHING_PLAN_PACKETS = [
+    bytes.fromhex("02064c0520201e20231e20181e20181e2a2b"),
+    bytes.fromhex("020b20231e0005"),
+]
+
+
+def _with_data(coordinator: OcleanCoordinator, model: str = "OCLEANY3S") -> OcleanCoordinator:
+    from custom_components.oclean_ble.models import OcleanDeviceData
+
+    coordinator.data = OcleanDeviceData(model_id=model)
+    return coordinator
+
+
+async def _run_action(coordinator: OcleanCoordinator, fake: FakeY3s, coro_factory):
+    with (
+        patch("custom_components.oclean_ble.coordinator.bluetooth"),
+        patch(
+            "custom_components.oclean_ble.coordinator.establish_connection",
+            new_callable=AsyncMock,
+            return_value=fake.client(),
+        ),
+        patch("custom_components.oclean_ble.coordinator.asyncio.sleep", new_callable=AsyncMock),
+        patch("custom_components.oclean_ble.coordinator.Y3S_REPLY_TIMEOUT", 0.05),
+    ):
+        await coro_factory(coordinator)
+
+
+class TestSchemeFrames:
+    def test_standard_plan_matches_capture(self):
+        from custom_components.oclean_ble.const import OCLEANY3S_SCHEME_HINT_TYPES, OCLEANY3S_SCHEMES
+        from custom_components.oclean_ble.coordinator import _build_scheme_packets
+
+        _, steps = OCLEANY3S_SCHEMES[0]
+        assert _build_scheme_packets(0, steps, OCLEANY3S_SCHEME_HINT_TYPES[0]) == [STANDARD_PLAN_FRAME]
+
+    def test_bleaching_plan_matches_capture(self):
+        from custom_components.oclean_ble.const import OCLEANY3S_SCHEME_HINT_TYPES, OCLEANY3S_SCHEMES
+        from custom_components.oclean_ble.coordinator import _build_scheme_packets
+
+        _, steps = OCLEANY3S_SCHEMES[76]
+        assert _build_scheme_packets(76, steps, OCLEANY3S_SCHEME_HINT_TYPES[76]) == BLEACHING_PLAN_PACKETS
+
+    def test_other_models_keep_gear_table_codes(self):
+        from custom_components.oclean_ble.const import OCLEANY3M_SCHEMES
+        from custom_components.oclean_ble.coordinator import _build_scheme_packets
+
+        _, steps = OCLEANY3M_SCHEMES[76]
+        assert _build_scheme_packets(76, steps)[0][4] == 0x00
+
+    def test_y3s_plan_list(self):
+        from custom_components.oclean_ble.const import SCHEMES_BY_MODEL
+
+        assert sorted(SCHEMES_BY_MODEL["OCLEANY3S"]) == [0, *range(72, 90)]
+        assert 90 in SCHEMES_BY_MODEL["OCLEANY3"]
+
+
+class TestY3sActions:
+    @pytest.mark.asyncio
+    async def test_scheme_write_is_acknowledged_per_packet(self):
+        fake = FakeY3s()
+        await _run_action(_with_data(_make_coordinator()), fake, lambda c: c.async_set_brush_scheme(76))
+        assert fake.writes == [(WRITE_CHAR_UUID, p) for p in BLEACHING_PLAN_PACKETS]
+
+    @pytest.mark.asyncio
+    async def test_area_remind_acknowledged(self):
+        fake = FakeY3s()
+        coordinator = _make_coordinator()
+        await _run_action(coordinator, fake, lambda c: c.async_set_area_remind(False))
+        assert fake.writes == [(WRITE_CHAR_UUID, b"\x02\x0d\x00")]
+        assert coordinator.area_remind is False
+
+    @pytest.mark.asyncio
+    async def test_over_pressure_acknowledged(self):
+        fake = FakeY3s()
+        await _run_action(_make_coordinator(), fake, lambda c: c.async_set_over_pressure(True))
+        assert fake.writes == [(WRITE_CHAR_UUID, b"\x02\x12\x01")]
+
+    @pytest.mark.asyncio
+    async def test_reset_brush_head_acknowledged(self):
+        fake = FakeY3s()
+        await _run_action(_make_coordinator(), fake, lambda c: c.async_reset_brush_head())
+        assert fake.writes == [(WRITE_CHAR_UUID, b"\x02\x0f")]
+
+    @pytest.mark.asyncio
+    async def test_sync_time_uses_0201_before_any_poll(self):
+        fake = FakeY3s()
+        coordinator = _make_coordinator()
+        assert coordinator._protocol.name == "Unknown"
+        await _run_action(coordinator, fake, lambda c: c.async_sync_time())
+        assert len(fake.writes) == 1
+        assert fake.writes[0][1][:2] == b"\x02\x01"
+        assert len(fake.writes[0][1]) == 10
+
+    @pytest.mark.asyncio
+    async def test_unacknowledged_write_raises(self):
+        from bleak import BleakError
+
+        fake = FakeY3s(ack_time=False)
+        with pytest.raises(BleakError, match="not acknowledged"):
+            await _run_action(_make_coordinator(), fake, lambda c: c.async_sync_time())
+
+    @pytest.mark.parametrize(
+        ("setter", "arg"),
+        [
+            ("async_set_remind_switch", True),
+            ("async_set_running_switch", True),
+            ("async_set_brush_head_max_days", 90),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unsupported_features_rejected(self, setter, arg):
+        fake = FakeY3s()
+        with pytest.raises(ValueError, match="not supported on this model"):
+            await _run_action(_make_coordinator(), fake, lambda c: getattr(c, setter)(arg))
+        assert fake.writes == []
+
+    def test_feature_supported(self):
+        y3s = _make_coordinator()
+        other = _make_coordinator(cached_model="OCLEANY3")
+        for key in ("remind_switch", "running_switch", "brush_head_max_days"):
+            assert y3s.feature_supported(key) is False
+            assert other.feature_supported(key) is True
+        assert y3s.feature_supported("area_remind") is True
+
+
+class TestEntityAvailability:
+    def _coord(self, supported: bool):
+        coord = MagicMock()
+        coord.data = MagicMock()
+        coord.feature_supported.return_value = supported
+        return coord
+
+    @pytest.mark.parametrize("supported", [True, False])
+    def test_switch(self, supported):
+        from custom_components.oclean_ble.switch import SWITCH_DESCRIPTIONS, OcleanSwitch
+
+        desc = next(d for d in SWITCH_DESCRIPTIONS if d.key == "remind_switch")
+        switch = OcleanSwitch(self._coord(supported), desc, "AA:BB:CC:DD:EE:FF", "Oclean")
+        assert switch.available is supported
+
+    @pytest.mark.parametrize("supported", [True, False])
+    def test_number(self, supported):
+        from custom_components.oclean_ble.number import NUMBER_DESCRIPTIONS, OcleanNumber
+
+        number = OcleanNumber(self._coord(supported), NUMBER_DESCRIPTIONS[0], "AA:BB:CC:DD:EE:FF", "Oclean")
+        assert number.available is supported
