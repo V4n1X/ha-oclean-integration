@@ -61,8 +61,12 @@ class TestSchemesForModel:
     def test_ocleany3_returns_y3_schemes(self):
         assert _schemes_for_model("OCLEANY3") is OCLEANY3_SCHEMES
 
-    def test_ocleany3s_returns_y3_schemes(self):
-        assert _schemes_for_model("OCLEANY3S") is OCLEANY3_SCHEMES
+    def test_ocleany3s_returns_its_own_schemes(self):
+        # The app's plan table for OCLEANY3S has pnum 0 and 72-89; pnum 90 is OCLEANY3-only.
+        schemes = _schemes_for_model("OCLEANY3S")
+        assert schemes is not None
+        assert 90 not in schemes
+        assert sorted(schemes) == [0, *range(72, 90)]
 
     def test_ocleany3t_returns_y3_schemes(self):
         assert _schemes_for_model("OCLEANY3T") is OCLEANY3_SCHEMES

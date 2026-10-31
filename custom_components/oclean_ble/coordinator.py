@@ -88,6 +88,7 @@ from .const import (
     READ_NOTIFY_CHAR_UUID,
     RECEIVE_BRUSH_UUID,
     RESP_Y3S_UNSUPPORTED,
+    SCHEME_HINT_TYPES_BY_MODEL,
     SCHEMES_BY_MODEL,
     SEND_BRUSH_CMD_UUID,
     STORAGE_VERSION,
@@ -115,7 +116,7 @@ from .parser import (
     parse_y3s_device_info,
     parse_y3s_record,
 )
-from .protocol import UNKNOWN, DeviceProtocol, is_known_model, protocol_for_model
+from .protocol import TYPE1_Y3S, UNKNOWN, DeviceProtocol, is_known_model, protocol_for_model
 from .statistics import import_new_sessions
 
 _LOGGER = logging.getLogger(__name__)
@@ -197,12 +198,22 @@ async def _try_subscribe_no_cccd(
 # Gear-byte encoding table used by m28p() for TYPE1 SetBrushScheme (0206).
 # Gears 1-12 map to specific encoded values; all others (13-41) encode as 0x00.
 _GEAR_ENCODE: dict[int, int] = {1: 5, 2: 6, 3: 7, 4: 8, 5: 17, 6: 18, 7: 19, 8: 20, 9: 21, 10: 22, 11: 23, 12: 24}
+# Step code of every step in a plan with hintType 1 (app builder a.b.p).
+_HINT_TYPE_1_STEP_CODE = 0x20
+
+# Entity features the OCLEANY3S does not have: its SDK class sends nothing for
+# 0239/0240, and 0217 only stores a value the brush does not act on (it is not a
+# lifetime in days). The entities stay unavailable on this model.
+_Y3S_UNSUPPORTED_FEATURES = frozenset({"remind_switch", "running_switch", "brush_head_max_days"})
 
 
-def _build_scheme_packets(pnum: int, steps: list[tuple[int, int]]) -> list[bytes]:
+def _build_scheme_packets(pnum: int, steps: list[tuple[int, int]], hint_type: int | None = None) -> list[bytes]:
     """Build TYPE1 SetBrushScheme BLE packet(s) following APK AbstractC0002b.m28p() logic.
 
     Single packet: [0x02, 0x06, pnum, stepCount, (enc_gear, gear, dur)*N, 0x00, 0x05]
+
+    enc_gear is 0x20 for plans with hintType 1 (verified on OCLEANY3S hardware); for
+    any other plan, and when *hint_type* is not given, it comes from the gear table.
 
     If the payload exceeds 20 bytes (conservative threshold for ATT_MTU=23), the
     APK splits it into two GATT writes:
@@ -211,7 +222,7 @@ def _build_scheme_packets(pnum: int, steps: list[tuple[int, int]]) -> list[bytes
     """
     payload = bytearray(CMD_SET_BRUSH_SCHEME) + bytearray([pnum & 0xFF, len(steps) & 0xFF])
     for gear, dur in steps:
-        payload.append(_GEAR_ENCODE.get(gear, 0))
+        payload.append(_HINT_TYPE_1_STEP_CODE if hint_type == 1 else _GEAR_ENCODE.get(gear, 0))
         payload.append(gear & 0xFF)
         payload.append(dur & 0xFF)
     payload += bytes([0x00, 0x05])
@@ -658,6 +669,10 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
 
     async def _connect_and_run(self, action: Callable[[BleakClient], Awaitable[None]]) -> None:
         """Connect, wait for the GATT table, run *action*, always disconnect."""
+        if self.is_verified_y3s:
+            # After a restart no poll may have selected the profile yet; actions on
+            # the OCLEANY3S must already use it (0201 time frame, acknowledged writes).
+            self._protocol = TYPE1_Y3S
         ble_device = self._resolve_ble_device()
         client = await establish_connection(
             BleakClient,
@@ -682,6 +697,11 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         """
 
         async def _action(client: BleakClient) -> None:
+            if self._protocol.verified_y3s_flow:
+                await self._y3s_send_acked(client, [CMD_CLEAR_BRUSH_HEAD])
+                self._log.info("brush head counter reset acknowledged")
+                return
+
             def _ack_handler(_sender: Any, raw: bytearray) -> None:
                 data = bytes(raw)
                 parsed = parse_notification(data)
@@ -722,6 +742,9 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         """
 
         async def _action(client: BleakClient) -> None:
+            if self._protocol.verified_y3s_flow:
+                await self._y3s_send_acked(client, [self._time_calibration_command()])
+                return
             subscribed: list[str] = []
             for char_uuid in self._protocol.notify_chars:
                 try:
@@ -735,6 +758,22 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                     await client.stop_notify(char_uuid)
 
         await self._run_ble_action("sync time", _action)
+
+    async def _y3s_send_acked(self, client: BleakClient, frames: list[bytes]) -> None:
+        """OCLEANY3S: write *frames* to fbb85 one by one; each must be answered with OK."""
+        link = _Y3sLink(self._log)
+        await self._subscribe_notifications(client, link.on_notify)
+        for frame in frames:
+            if not await link.command(client, frame):
+                raise BleakError(f"command {frame.hex()} was not acknowledged by the brush")
+
+    def feature_supported(self, key: str) -> bool:
+        """False for entity features the known model does not have (see _Y3S_UNSUPPORTED_FEATURES)."""
+        return not (self.is_verified_y3s and key in _Y3S_UNSUPPORTED_FEATURES)
+
+    def _require_feature(self, key: str) -> None:
+        if not self.feature_supported(key):
+            raise ValueError(f"{key} is not supported on this model")
 
     @property
     def is_verified_y3s(self) -> bool:
@@ -824,6 +863,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         Called by the Brushing Reminder switch entity.  State is persisted so
         the switch shows the correct value after HA restarts.
         """
+        self._require_feature("remind_switch")
         cmd = CMD_REMIND_SWITCH + bytes([0x01 if enabled else 0x00])
 
         async def _action(client: BleakClient) -> None:
@@ -840,6 +880,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         Called by the Auto Power-Off Timer switch entity.  State is persisted so
         the switch shows the correct value after HA restarts.
         """
+        self._require_feature("running_switch")
         cmd = CMD_RUNNING_SWITCH + bytes([0x01 if enabled else 0x00])
 
         async def _action(client: BleakClient) -> None:
@@ -856,6 +897,7 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         Called by the Brush Head Max Lifetime number entity.  State is persisted
         so the number shows the correct value after HA restarts.
         """
+        self._require_feature("brush_head_max_days")
         cmd = CMD_BRUSH_HEAD_MAX_DAYS + days.to_bytes(2, "big")
 
         async def _action(client: BleakClient) -> None:
@@ -886,9 +928,15 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         if scheme is None:
             raise ValueError(f"Unknown scheme pnum {pnum} for model {model_id}")
         name, steps = scheme
-        packets = _build_scheme_packets(pnum, steps)
+        hint_type = SCHEME_HINT_TYPES_BY_MODEL.get(model_id or "", {}).get(pnum)
+        packets = _build_scheme_packets(pnum, steps, hint_type)
 
         async def _action(client: BleakClient) -> None:
+            if self._protocol.verified_y3s_flow:
+                await self._y3s_send_acked(client, packets)
+                self._log.info("brush scheme set to pnum=%d (%s): %s", pnum, name, " ".join(p.hex() for p in packets))
+                return
+
             def _ack_handler(_sender: Any, raw: bytearray) -> None:
                 data = bytes(raw)
                 parsed = parse_notification(data)
@@ -935,7 +983,11 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         On TYPE1 devices the standalone write_char is fbb85 (APK C3376s f12501k).
         Subscribing to fbb90/fbb86 first mirrors the poll setup and ensures the
         device is ready to accept writes on all protocols.
+        On the OCLEANY3S the write must be acknowledged with OK (BleakError otherwise).
         """
+        if self._protocol.verified_y3s_flow:
+            await self._y3s_send_acked(client, [cmd])
+            return
         subscribed: list[str] = []
         for char_uuid in self._protocol.notify_chars:
             try:

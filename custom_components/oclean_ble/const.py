@@ -394,7 +394,7 @@ OCLEANY3M_SCHEMES: dict[int, tuple[str, list[tuple[int, int]]]] = {
     89: ("Travel", [(17, 30), (17, 30), (35, 30), (35, 30)]),
 }
 
-# OCLEANY3 brush scheme presets (TYPE1 devices: OCLEANY3, OCLEANY3S, OCLEANY3T).
+# OCLEANY3 brush scheme presets (TYPE1 devices: OCLEANY3, OCLEANY3T).
 # Extends OCLEANY3M_SCHEMES with pnum 90 (Gestation Care), which is exclusive to
 # the OCLEANY3 deviceType in the GetAllResources API response.
 OCLEANY3_SCHEMES: dict[int, tuple[str, list[tuple[int, int]]]] = {
@@ -425,11 +425,28 @@ OCLEANY5_SCHEMES: dict[int, tuple[str, list[tuple[int, int]]]] = {
     104: ("Gum Care Cleaning", [(8, 30), (8, 30), (8, 30), (8, 30), (8, 30), (37, 20), (37, 30)]),
 }
 
+# OCLEANY3S (Oclean X Pro) system plans. Checked step by step against the official
+# app's plan table for deviceType OCLEANY3S (BrushPlan/StepInfo in its database,
+# steps in table order): identical to OCLEANY3M_SCHEMES. pnum 90 belongs to
+# OCLEANY3 only and is not offered to the OCLEANY3S.
+OCLEANY3S_SCHEMES: dict[int, tuple[str, list[tuple[int, int]]]] = dict(OCLEANY3M_SCHEMES)
+
+# hintType of the system plans (app: BrushPlan.ToastType). It selects the first byte
+# of every step in the 0206 frame: 0x20 for hintType 1, otherwise the gear table.
+# Both variants verified on OCLEANY3S hardware: pnum 0 (hintType 2) is sent as
+# "02 06 00 04 06 02 1e …", pnum 76 (hintType 1) as "02 06 4c 05 20 20 1e …".
+OCLEANY3S_SCHEME_HINT_TYPES: dict[int, int] = {pnum: (2 if pnum == 0 else 1) for pnum in OCLEANY3S_SCHEMES}
+
+# Per-model hintType tables; models without one keep the gear-table step code.
+SCHEME_HINT_TYPES_BY_MODEL: dict[str, dict[int, int]] = {
+    "OCLEANY3S": OCLEANY3S_SCHEME_HINT_TYPES,
+}
+
 # Per-model scheme dict overrides.  Models not listed fall back to OCLEANY3M_SCHEMES
 # (which covers all other TYPE1 devices: OCLEANY3M*, OCLEANY3P*, OCLEANY3D*, OCLEANX20, …).
 SCHEMES_BY_MODEL: dict[str, dict[int, tuple[str, list[tuple[int, int]]]]] = {
     "OCLEANY3": OCLEANY3_SCHEMES,  # has exclusive pnum 90
-    "OCLEANY3S": OCLEANY3_SCHEMES,
+    "OCLEANY3S": OCLEANY3S_SCHEMES,
     "OCLEANY3T": OCLEANY3_SCHEMES,
     "OCLEANY5": OCLEANY5_SCHEMES,  # Oclean Z1 — different pnum range (91-104)
 }

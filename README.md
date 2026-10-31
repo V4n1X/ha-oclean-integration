@@ -101,11 +101,15 @@ Entity IDs follow the pattern `<platform>.<device_name>_<suffix>` where `<device
 | Brushing Reminder | `_brushing_reminder` | Enables/disables the brushing reminder on the device (writes CMD 0239; state persisted locally – assumes state, no read-back) | ⚠️ Unconfirmed |
 | Auto Power-Off Timer | `_auto_power_off_timer` | Enables/disables the automatic power-off timer on the device (writes CMD 0240; state persisted locally – assumes state, no read-back) | ⚠️ Unconfirmed |
 
+On the Oclean X Pro (`OCLEANY3S`), Area Reminder and Over-Pressure Alert are read back from the brush on every poll and each write must be acknowledged by the brush (both verified on hardware). Brushing Reminder and Auto Power-Off Timer are unavailable on this model: its firmware has no such settings.
+
 ### Numbers
 
 | Name | Suffix | Description | Unit | Status |
 |------|--------|-------------|------|--------|
 | Brush Head Lifetime | `_brush_head_lifetime` | Maximum brush head lifetime in days. When "Head Age" or "Head Sessions" exceeds this value, a replacement reminder is shown in HA (writes CMD 0217; state persisted locally) | d | ⚠️ Unconfirmed |
+
+Unavailable on the Oclean X Pro (`OCLEANY3S`): there `0217` writes a stored value (`headMaxTimeLong`, most likely minutes, factory value 240) that the brush does not act on; it is not a lifetime in days. The official app judges the head by its days in use against 90 days.
 
 ### Buttons
 

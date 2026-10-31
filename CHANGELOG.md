@@ -14,6 +14,13 @@
   - Area reminder, over-pressure protection and the active brush scheme are read back from the brush on every poll.
 - **Clear Stored Sessions button (`OCLEANY3S` only, disabled by default).** Recovery when the brush stores too many sessions to read them safely.
 
+### Fixes (`OCLEANY3S` only)
+
+- **Brush schemes are sent like the official app sends them.** Plans 72–89 have hintType 1, so every step starts with `0x20` instead of the gear-table code; plan 0 keeps the gear-table code. Both frames match captures byte for byte, including the split `0206 … 2A 2B` + `020B …` form. Plan 90 (OCLEANY3 only) is no longer offered.
+- **Write actions wait for the brush's confirmation.** Area reminder, over-pressure alert, brush scheme, brush-head reset and time sync now fail with an error when the brush does not answer `OK`, instead of assuming success after a fixed delay.
+- **Actions use the right profile right after a restart.** Before the first poll, Sync Time sent the generic `020E` frame; it now sends the verified `0201` frame.
+- **Brushing Reminder, Auto Power-Off Timer and Brush Head Lifetime are unavailable.** The brush has no reminder or power-off setting (`0239`/`0240` are not implemented for this model), and `0217` stores a value the brush ignores rather than a lifetime in days.
+
 ### Changed
 
 - The DIS read now comes before the time calibration in every poll, so a verified profile is known before anything is written. Other models still get the same time-calibration frame as before.

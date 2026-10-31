@@ -88,6 +88,10 @@ class OcleanSwitch(OcleanEntity, SwitchEntity):
     }
 
     @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.feature_supported(self.entity_description.key)
+
+    @property
     def is_on(self) -> bool | None:
         prop = self._KEY_TO_PROP.get(self.entity_description.key)
         return getattr(self.coordinator, prop, None) if prop else None

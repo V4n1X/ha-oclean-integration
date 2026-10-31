@@ -63,6 +63,10 @@ class OcleanNumber(OcleanEntity, NumberEntity):
         self.entity_description = description
 
     @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.feature_supported(self.entity_description.key)
+
+    @property
     def native_value(self) -> int | None:
         if self.entity_description.key == "brush_head_max_days":
             v = self.coordinator.brush_head_max_days
