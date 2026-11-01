@@ -48,6 +48,7 @@ from .const import (
     TOOTH_AREA_NAMES,
     Y3S_DEVICE_INFO_LEN,
     Y3S_MIN_RECORD_YEAR,
+    Y3S_RECORD_FILLER,
     Y3S_RECORD_SIZE,
 )
 
@@ -1702,7 +1703,10 @@ def parse_y3s_battery(payload: bytes) -> dict[str, Any]:
       1-2   cell voltage in mV, BE
       3     battery level in % (identical to 0x2A19)
       4     number of sessions stored on the brush (matched the following 0307 dump)
-      5     always 0
+      5     always 0 in every capture
+
+    The stored-session count is only reported when byte 5 is 0: whether byte 5 is a
+    high byte of the count is unknown, so any other value means "count unknown".
     """
     if len(payload) < 5:
         _LOGGER.debug("Oclean Y3S 0303 reply too short: %s", payload.hex())
@@ -1710,8 +1714,9 @@ def parse_y3s_battery(payload: bytes) -> dict[str, Any]:
     result: dict[str, Any] = {
         Y3S_BATTERY_ON_CHARGER: payload[0] == 1,
         Y3S_BATTERY_VOLTAGE_MV: _be16(payload, 1),
-        Y3S_BATTERY_STORED_SESSIONS: payload[4],
     }
+    if len(payload) >= 6 and payload[5] == 0:
+        result[Y3S_BATTERY_STORED_SESSIONS] = payload[4]
     if 0 <= payload[3] <= 100:
         result[DATA_BATTERY] = payload[3]
     _LOGGER.debug("Oclean Y3S 0303: %s (raw: %s)", result, payload.hex())
@@ -1721,7 +1726,8 @@ def parse_y3s_battery(payload: bytes) -> dict[str, Any]:
 def _y3s_record_timestamp(record: bytes) -> int | None:
     """UTC timestamp of a record's start time, using its own time-zone index (byte 17)."""
     year = _YEAR_2000 + record[0]
-    if year < Y3S_MIN_RECORD_YEAR or year > datetime.datetime.now().year + 1:
+    # Same bounds as the official app: not before 2017, not after the current year.
+    if year < Y3S_MIN_RECORD_YEAR or year > datetime.datetime.now().year:
         return None
     try:
         local = datetime.datetime(year, record[1], record[2], record[3], record[4], record[5])
@@ -1754,11 +1760,15 @@ def parse_y3s_record(record: bytes) -> dict[str, Any]:
       34     points (0 on this model)
       35-41  0xFF filler
 
-    Returns {} for records with an implausible date; the official app files those
-    as error records and does not show them either.
+    Returns {} for records with an implausible date (the official app files those
+    as error records and does not show them either) and for records without the
+    0xFF filler, which were cut or shifted in transfer.
     """
     if len(record) < Y3S_RECORD_SIZE:
         _LOGGER.debug("Oclean Y3S record too short (%d bytes): %s", len(record), record.hex())
+        return {}
+    if record[35:42] != Y3S_RECORD_FILLER:
+        _LOGGER.debug("Oclean Y3S record without 0xFF filler dropped: %s", record[:Y3S_RECORD_SIZE].hex())
         return {}
     timestamp = _y3s_record_timestamp(record)
     if timestamp is None:

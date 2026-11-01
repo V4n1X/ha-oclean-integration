@@ -8,7 +8,10 @@
   - Commands are sent one at a time, each waiting for its reply on `fbb86`, in the official app's order: `030201`, `0201`, `0303`, `0307`, `0202`.
   - Only `0307` goes to `fbb89`; `030201`, `0303` and `0202` go to `fbb85`. The generic profile writes them to `fbb89`.
   - `0202` is "clear running data" (it deletes every stored session), not a device-info request. It is sent only after a complete `0307` dump, as the official app does.
-  - `0307` is skipped when `0303` reports no stored sessions, more than 10 stored sessions, or a battery below 3 %. With 32 stored sessions `0307` locked the firmware up until the battery was completely empty; an interrupted dump is never re-sent in the same poll.
+  - `0307` is skipped when `0303` reports no stored sessions, more than 10 stored sessions, an unknown count (byte 5 not 0), or a battery below 3 %. With 32 stored sessions `0307` locked the firmware up until the battery was completely empty.
+  - A dump that breaks off is never re-sent automatically – that is how the official app keeps a locked-up brush locked. The block is persisted; pressing **Update Now** retries once, **Clear Stored Sessions** or an empty store lifts it.
+  - Sessions are saved to Home Assistant's store before `0202` deletes them on the brush and removed from it only after a successful import, so a timeout or failed import cannot lose them.
+  - Replies are only taken from `fbb86` and the dump only from `fbb90`; records without their `0xFF` filler (cut or shifted in transfer) are dropped.
   - The two-part `030201` reply is reassembled to its 34-byte payload, so battery, brush mode and brush-head counters come from the right offsets (head days at 27–28, head uses at 29–30). Battery comes from `0303` byte 3.
   - Session records: duration is the brushed time (`validDuration`), the timestamp honours the record's own time-zone index, `gestureCode` is byte 18, `gestureArray` has 13 values, coverage uses the brushed time like the app, and records with an unset clock (year 2000) are skipped like the app's error records. The 13 stale bytes after an empty `0307` header are no longer read as a session.
   - Area reminder, over-pressure protection and the active brush scheme are read back from the brush on every poll.
@@ -17,14 +20,15 @@
 ### Fixes (`OCLEANY3S` only)
 
 - **Brush schemes are sent like the official app sends them.** Plans 72–89 have hintType 1, so every step starts with `0x20` instead of the gear-table code; plan 0 keeps the gear-table code. Both frames match captures byte for byte, including the split `0206 … 2A 2B` + `020B …` form. Plan 90 (OCLEANY3 only) is no longer offered.
-- **Write actions wait for the brush's confirmation.** Area reminder, over-pressure alert, brush scheme, brush-head reset and time sync now fail with an error when the brush does not answer `OK`, instead of assuming success after a fixed delay.
+- **Write actions wait for the brush's confirmation.** Area reminder, over-pressure alert, brush scheme, brush-head reset and time sync now fail with an error when the brush does not answer `OK`, instead of assuming success after a fixed delay. Nothing is written when the replies cannot be received.
 - **Actions use the right profile right after a restart.** Before the first poll, Sync Time sent the generic `020E` frame; it now sends the verified `0201` frame.
 - **Brushing Reminder, Auto Power-Off Timer and Brush Head Lifetime are unavailable.** The brush has no reminder or power-off setting (`0239`/`0240` are not implemented for this model), and `0217` stores a value the brush ignores rather than a lifetime in days.
 
 ### Fixes
 
-- **Notifications work again through an ESPHome BLE proxy (issue #102).** On connections through a proxy, a notify characteristic without a CCCD (`fbb86`/`fbb90` on the Oclean X Pro, `fbb86` on other models) failed with `handle=65534 … Invalid handle`. bleak-esphome registers the subscription on the proxy first and then writes the CCCD itself; since no CCCD exists, that write failed and bleak-esphome removed the registration again, so no reply ever arrived and a poll only produced an empty session list and a battery value. The integration now registers the subscription directly on the proxy in that case, without a descriptor write. A real stale handle is not affected (only the injected placeholder handle 0xFFFE is treated as "no CCCD").
-- **The model is remembered once it has been identified.** A failed DIS read could select the generic discovery profile again – after a restart, or later when the model characteristic fails while HW/SW read fine. The identified model ID is now pinned and persisted, so the generic profile (with its `0202` and unguarded `0307`) is only ever used before the first successful identification.
+- **Oclean X Pro (`OCLEANY3S`) notifications through an ESPHome BLE proxy (issue #102).** `fbb86`/`fbb90` have no CCCD. bleak-esphome registers a subscription on the proxy and then writes the CCCD itself; with the placeholder descriptor the integration injected, that write went to handle 0xFFFE on the brush, failed with `handle=65534 … Invalid handle`, and bleak-esphome removed the registration again, so no reply ever arrived. For the `OCLEANY3S` the subscription is now registered directly on the proxy, without any descriptor write. Other models keep their previous no-CCCD handling, because the proxy path is not verified on them.
+- **The model is remembered once it has been identified.** A failed DIS read could select the generic discovery profile again – after a restart, or later when the model characteristic fails while HW/SW read fine. The identified model ID is now pinned and persisted.
+- **No command without a model ID.** When the model ID cannot be read and no model was identified before, a poll only reads (DIS, battery) and sends no command, and write actions are refused. The generic discovery profile sent `0202` and an unguarded `0307`, which on an `OCLEANY3S` delete the stored sessions or lock the firmware up, and the model cannot be told apart without its ID. The next poll reads the model again.
 
 ### Changed
 

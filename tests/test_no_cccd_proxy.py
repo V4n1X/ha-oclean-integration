@@ -20,25 +20,73 @@ from custom_components.oclean_ble.const import (
 )
 from custom_components.oclean_ble.coordinator import (
     OcleanCoordinator,
+    _is_proxy_client,
     _try_subscribe_no_cccd_via_proxy,
     err_is_invalid_handle,
 )
-from custom_components.oclean_ble.protocol import TYPE1
-from tests.simulator import OcleanDeviceSimulator
+from custom_components.oclean_ble.protocol import TYPE1, TYPE1_Y3S
 
 # Notification bytes from the real capture (snoop13): battery 8 %, device info.
 BATTERY_NOTIFY = bytes.fromhex("0303020dc4080200")
 DEVICE_INFO_NOTIFY = bytes.fromhex("03022324000000000000000000ff00000000029f")
 _INVALID_HANDLE = "Bluetooth GATT Error address=70:28:45:68:4A:77 handle=65534 error=1 description=Invalid handle"
+_NO_CCCD = "proxy: Oclean X: Characteristic fbb86 does not have a characteristic client config descriptor."
 
 
-def _make_coordinator() -> OcleanCoordinator:
+def _make_coordinator(protocol=TYPE1) -> OcleanCoordinator:
     hass = MagicMock()
     hass.data = {}
     coord = OcleanCoordinator(hass, "AA:BB:CC:DD:EE:FF", "Oclean", 300)
     coord._store_loaded = True
-    coord._protocol = TYPE1
+    coord._protocol = protocol
     return coord
+
+
+class RealSequenceProxyClient:
+    """bleak-esphome's start_notify on a characteristic without CCCD, step by step.
+
+    First call: the proxy registration is made and removed again, then
+    "does not have a characteristic client config descriptor" is raised. Once a
+    placeholder CCCD was injected, bleak-esphome writes it (an ATT write to handle
+    0xFFFE that reaches the brush) and raises "Invalid handle".
+    """
+
+    def __init__(self) -> None:
+        self.public_calls: dict[str, int] = {}
+        self.placeholder_writes = 0
+        self.proxy_registrations: list[int] = []
+        chars = {}
+        for uuid, handle in ((READ_NOTIFY_CHAR_UUID, 0x17), (RECEIVE_BRUSH_UUID, 0x1F)):
+            char = MagicMock()
+            char.uuid = uuid
+            char.properties = ["read", "notify"]
+            char.handle = handle
+            char.get_descriptor.return_value = None
+            chars[uuid] = char
+        self.services = MagicMock()
+        self.services.get_characteristic.side_effect = chars.get
+        self._backend = MagicMock()
+        self._backend._address_as_int = 0x77284A685F452870
+        self._backend._notify_cancels = {}
+        api = MagicMock()
+
+        async def _start_notify(address, handle, callback):
+            self.proxy_registrations.append(handle)
+            return (AsyncMock(), lambda: None)
+
+        api.bluetooth_gatt_start_notify = AsyncMock(side_effect=_start_notify)
+        self._backend._client = api
+
+        async def _public_start_notify(uuid, handler):
+            self.public_calls[uuid] = self.public_calls.get(uuid, 0) + 1
+            if self.public_calls[uuid] == 1:
+                raise BleakError(_NO_CCCD)
+            self.placeholder_writes += 1
+            raise BleakError(_INVALID_HANDLE)
+
+        self.start_notify = AsyncMock(side_effect=_public_start_notify)
+        self.stop_notify = AsyncMock()
+        self.write_gatt_descriptor = AsyncMock()
 
 
 class FakeProxyClient:
@@ -135,51 +183,65 @@ class TestProxySubscribe:
 
 
 class TestSubscribeNotificationsFallsBack:
-    @pytest.mark.asyncio
-    async def test_invalid_handle_uses_proxy_path(self):
-        client = FakeProxyClient()
-        coordinator = _make_coordinator()
-        handler = MagicMock()
+    async def _subscribe(self, coordinator, client):
         with patch("custom_components.oclean_ble.coordinator.asyncio.sleep", new_callable=AsyncMock):
-            subscribed = await coordinator._subscribe_notifications(client, handler)
+            return await coordinator._subscribe_notifications(client, MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_y3s_registers_on_the_proxy_without_placeholder_writes(self):
+        client = RealSequenceProxyClient()
+        subscribed = await self._subscribe(_make_coordinator(TYPE1_Y3S), client)
         assert READ_NOTIFY_CHAR_UUID in subscribed
-        assert client.proxy_registrations
+        assert RECEIVE_BRUSH_UUID in subscribed
+        assert client.proxy_registrations == [0x17, 0x1F]
+        # No placeholder CCCD: nothing is written to handle 0xFFFE on the brush.
+        assert client.placeholder_writes == 0
+        assert all(n == 1 for n in client.public_calls.values())
+
+    @pytest.mark.asyncio
+    async def test_y3s_treats_placeholder_invalid_handle_as_no_cccd(self):
+        client = RealSequenceProxyClient()
+        client.start_notify = AsyncMock(side_effect=BleakError(_INVALID_HANDLE))
+        subscribed = await self._subscribe(_make_coordinator(TYPE1_Y3S), client)
+        assert READ_NOTIFY_CHAR_UUID in subscribed
+
+    @pytest.mark.asyncio
+    async def test_other_models_keep_the_original_path(self):
+        # Not verified on other models: their no-CCCD handling stays exactly as before
+        # (placeholder path, which a proxy rejects; no direct proxy registration).
+        client = RealSequenceProxyClient()
+        subscribed = await self._subscribe(_make_coordinator(TYPE1), client)
+        assert READ_NOTIFY_CHAR_UUID not in subscribed
+        assert client.proxy_registrations == []
+
+    @pytest.mark.asyncio
+    async def test_other_models_ignore_invalid_handle(self):
+        client = RealSequenceProxyClient()
+        client.start_notify = AsyncMock(side_effect=BleakError(_INVALID_HANDLE))
+        subscribed = await self._subscribe(_make_coordinator(TYPE1), client)
+        assert subscribed == frozenset()
+        assert client.proxy_registrations == []
 
     @pytest.mark.asyncio
     async def test_unknown_reason_is_not_treated_as_no_cccd(self):
-        client = FakeProxyClient()
+        client = RealSequenceProxyClient()
         client.start_notify = AsyncMock(side_effect=BleakError("Connection reset"))
-        coordinator = _make_coordinator()
-        with patch("custom_components.oclean_ble.coordinator.asyncio.sleep", new_callable=AsyncMock):
-            subscribed = await coordinator._subscribe_notifications(client, MagicMock())
+        subscribed = await self._subscribe(_make_coordinator(TYPE1_Y3S), client)
         assert READ_NOTIFY_CHAR_UUID not in subscribed
         assert client.proxy_registrations == []
 
 
-class TestIssue102Poll:
-    """Regression test for the scenario in issue #102."""
+class TestIsProxyClient:
+    def test_proxy_backend(self):
+        assert _is_proxy_client(RealSequenceProxyClient()) is True
 
-    @pytest.mark.asyncio
-    async def test_poll_receives_data_through_the_proxy_path(self):
-        from tests.integration_helpers import run_poll
+    def test_local_backend(self):
+        client = MagicMock()
+        client._backend = MagicMock(spec=["start_notify"])
+        assert _is_proxy_client(client) is False
 
-        base = OcleanDeviceSimulator().with_battery(8).build_client()
-        client = FakeProxyClient()
-        # The proxy fails the descriptor write exactly as in the issue; DIS and the
-        # battery read work (the log shows them succeeding).
-        client.start_notify = AsyncMock(side_effect=BleakError(_INVALID_HANDLE))
-        client.read_gatt_char = base.read_gatt_char
-        client.write_gatt_char = base.write_gatt_char
-        coordinator = _make_coordinator()
-
-        result = await run_poll(coordinator, client)
-
-        assert result[DATA_BATTERY] == 8
-        # The subscription reached the proxy instead of being dropped after the
-        # failed descriptor write, so the brush's replies would be delivered.
-        assert client.proxy_registrations
-        assert READ_NOTIFY_CHAR_UUID in coordinator._protocol.notify_chars
-        assert RECEIVE_BRUSH_UUID in coordinator._protocol.notify_chars
+    def test_no_backend(self):
+        assert _is_proxy_client(MagicMock(spec=["start_notify"])) is False
 
 
 class TestModelIsPinned:

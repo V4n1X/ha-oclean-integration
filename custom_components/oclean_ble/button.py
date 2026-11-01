@@ -81,6 +81,8 @@ class OcleanButton(OcleanEntity, ButtonEntity):
         elif self.entity_description.key == "sync_time":
             await self.coordinator.async_sync_time()
         elif self.entity_description.key == "poll_now":
-            await self.coordinator.async_poll_now()
+            # A user press may retry an OCLEANY3S session download that broke off;
+            # the oclean_ble.poll action (automations) may not.
+            await self.coordinator.async_poll_now(retry_session_download=True)
         elif self.entity_description.key == "clear_stored_sessions":
             await self.coordinator.async_clear_stored_sessions()
