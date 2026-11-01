@@ -117,7 +117,7 @@ Unavailable on the Oclean X Pro (`OCLEANY3S`): there `0217` writes a stored valu
 |------|--------|-------------|--------|
 | Reset Brush Head | `_reset_brush_head` | Resets the brush head wear counter on the device (CMD 020F) and clears the local session counter | ⚠️ Unconfirmed |
 | Sync Time | `_sync_time` | Synchronises the current time to the device clock | ✅ Tested |
-| Update Now | `_update_now` | Triggers an immediate BLE poll (same as the `oclean_ble.poll` action) | ✅ Tested |
+| Update Now | `_update_now` | Triggers an immediate BLE poll (same as the `oclean_ble.poll` action). On the Oclean X Pro (OCLEANY3S) it also retries a session download that broke off; the action does not | ✅ Tested |
 | Clear Stored Sessions | `_clear_stored_sessions` | Oclean X Pro (OCLEANY3S) only, disabled by default: deletes all sessions stored on the brush (CMD 0202). Recovery when the brush stores too many sessions to read them safely | ✅ Frame verified on hardware |
 
 **Legend:**
@@ -289,7 +289,9 @@ Why the limits: with 32 stored sessions, `0307` locked the brush's firmware up �
 
 Because the store is cleared after every sync, a session is read either by Home Assistant or by the official app, whichever syncs first.
 
-With an ESPHome BLE proxy the brush's notify characteristics work too: they have no CCCD descriptor, and the integration subscribes on the proxy without one instead of failing on the descriptor write (this was the cause of empty session lists in issue #102).
+If a session download breaks off (the brush stops sending, a proxy drops data), the sessions stay on the brush and **scheduled polls do not request them again** – re-sending after a broken download is how the official app keeps a locked-up brush locked. A warning in the log says so. Press **Update Now** to retry once, or **Clear Stored Sessions** to delete them. Sessions that were read are saved before the brush deletes them, so an aborted poll cannot lose them.
+
+With an ESPHome BLE proxy the brush's notify characteristics work too: they have no CCCD descriptor, and for this model the integration registers them directly on the proxy without any descriptor write (the failing descriptor write was the cause of empty session lists in issue #102).
 
 ---
 

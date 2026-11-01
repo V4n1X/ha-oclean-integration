@@ -109,7 +109,9 @@ class OcleanSchemeSelect(OcleanEntity, SelectEntity):
         if schemes is None:
             return None
         pnum = self.coordinator.active_scheme_pnum
-        if pnum is None:
+        # On the OCLEANY3S brush_mode is the 0209 mode byte, not a plan number; the
+        # active plan is read back from the brush (active_scheme_pnum) instead.
+        if pnum is None and self.coordinator.is_verified_y3s is not True:
             pnum = self.coordinator.data.brush_mode
         if pnum is None:
             return None

@@ -105,7 +105,7 @@ class TestOcleanButtonAsyncPress:
     async def test_poll_now(self):
         button, coord = _make_button("poll_now")
         await button.async_press()
-        coord.async_poll_now.assert_awaited_once()
+        coord.async_poll_now.assert_awaited_once_with(retry_session_download=True)
 
 
 # ---------------------------------------------------------------------------

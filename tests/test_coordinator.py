@@ -54,6 +54,17 @@ def _make_coordinator(hass=None, mac="AA:BB:CC:DD:EE:FF", poll_interval=300):
     return OcleanCoordinator(hass, mac, "Oclean", poll_interval)
 
 
+def _make_identified_coordinator(model_id: str):
+    """Coordinator whose brush model was identified by an earlier poll.
+
+    Write actions are refused while no model is known; the active protocol stays
+    as before the first poll after a restart (UNKNOWN) unless a test sets it.
+    """
+    coord = _make_coordinator()
+    coord._identified_model = model_id
+    return coord
+
+
 def _make_bleak_client(battery_value=75):
     """Return a fully mocked BleakClient."""
     client = AsyncMock()
@@ -1654,7 +1665,7 @@ class TestAsyncSyncTime:
     @pytest.mark.asyncio
     async def test_sends_020e_for_unknown_protocol(self):
         """async_sync_time must write 020E + 4-byte timestamp for UNKNOWN protocol."""
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         client = _make_bleak_client()
 
         with (
@@ -1683,7 +1694,7 @@ class TestAsyncSyncTime:
         """
         from custom_components.oclean_ble.protocol import TYPE1
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         coord._protocol = TYPE1
         client = _make_bleak_client()
 
@@ -1717,7 +1728,7 @@ class TestAsyncSyncTime:
         """disconnect must be called even when _calibrate_time raises."""
         from bleak import BleakError
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         client = _make_bleak_client()
         client.write_gatt_char = AsyncMock(side_effect=BleakError("write failed"))
 
@@ -1845,7 +1856,7 @@ class TestHardwareBrushHeadCounter:
     @pytest.mark.asyncio
     async def test_sw_counter_reset_on_brush_head_reset(self):
         """async_reset_brush_head must reset SW counter to 0."""
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         coord._store_loaded = True
         coord._brush_head_sw_count = 7
         client = _make_bleak_client()
@@ -2660,7 +2671,7 @@ class TestAsyncResetBrushHead:
         """async_reset_brush_head must send CMD_CLEAR_BRUSH_HEAD to the device."""
         from custom_components.oclean_ble.const import CMD_CLEAR_BRUSH_HEAD, WRITE_CHAR_UUID
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         coord._store_loaded = True
         client = _make_bleak_client()
 
@@ -2691,7 +2702,7 @@ class TestStandaloneWrites:
         """async_set_area_remind(True) must write CMD_AREA_REMIND + 0x01."""
         from custom_components.oclean_ble.const import CMD_AREA_REMIND
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         client = _make_bleak_client()
 
         with (
@@ -2716,7 +2727,7 @@ class TestStandaloneWrites:
         """async_set_area_remind(False) must write CMD_AREA_REMIND + 0x00."""
         from custom_components.oclean_ble.const import CMD_AREA_REMIND
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         client = _make_bleak_client()
 
         with (
@@ -2741,7 +2752,7 @@ class TestStandaloneWrites:
         """async_set_brush_head_max_days must write CMD_BRUSH_HEAD_MAX_DAYS + 2-byte big-endian days."""
         from custom_components.oclean_ble.const import CMD_BRUSH_HEAD_MAX_DAYS
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         client = _make_bleak_client()
 
         with (
@@ -2767,7 +2778,7 @@ class TestStandaloneWrites:
         from custom_components.oclean_ble.const import CMD_AREA_REMIND
         from custom_components.oclean_ble.protocol import TYPE1
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         coord._protocol = TYPE1
         client = _make_bleak_client()
 
@@ -2839,7 +2850,7 @@ class TestTypeZ1Protocol:
         """TYPE_Z1 uses_t1_calibration=True → sync_time must send 0201 + 8-byte payload."""
         from custom_components.oclean_ble.protocol import TYPE_Z1
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY5")
         coord._protocol = TYPE_Z1
         client = _make_bleak_client()
 
@@ -2865,7 +2876,7 @@ class TestTypeZ1Protocol:
         from custom_components.oclean_ble.const import CMD_AREA_REMIND, WRITE_CHAR_UUID
         from custom_components.oclean_ble.protocol import TYPE_Z1
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY5")
         coord._protocol = TYPE_Z1
         client = _make_bleak_client()
 
@@ -2893,7 +2904,7 @@ class TestTypeZ1Protocol:
         from custom_components.oclean_ble.const import CMD_AREA_REMIND
         from custom_components.oclean_ble.protocol import TYPE_Z1
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY5")
         coord._protocol = TYPE_Z1
         client = _make_bleak_client()
 
@@ -2932,7 +2943,7 @@ class TestWriteActionProtection:
         """A proxy-leaked CancelledError from establish_connection becomes BleakError."""
         from bleak import BleakError
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
 
         with (
             patch("custom_components.oclean_ble.coordinator.bluetooth") as bt_mock,
@@ -2953,7 +2964,7 @@ class TestWriteActionProtection:
     @pytest.mark.asyncio
     async def test_genuine_cancellation_propagates(self):
         """A real task cancel (HA shutdown/reload) must re-raise CancelledError."""
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         started = asyncio.Event()
 
         async def _block(*_args, **_kwargs):
@@ -2980,7 +2991,7 @@ class TestWriteActionProtection:
         """A hung connect must be bounded by BLE_ACTION_TOTAL_TIMEOUT → BleakError."""
         from bleak import BleakError
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
 
         async def _hang(*_args, **_kwargs):
             await asyncio.Event().wait()  # never returns
@@ -3003,7 +3014,7 @@ class TestWriteActionProtection:
         """When the GATT write raises, the client must still be disconnected."""
         from bleak import BleakError
 
-        coord = _make_coordinator()
+        coord = _make_identified_coordinator("OCLEANY3M")
         client = _make_bleak_client()
         client.write_gatt_char.side_effect = BleakError("write failed")
 

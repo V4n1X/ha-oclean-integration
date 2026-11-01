@@ -11,10 +11,10 @@ Real device behaviour (logs/20260313_#7_bato2000_oclean_ble.log):
   - read_gatt_char(READ_NOTIFY_CHAR_UUID) → b'' (empty, device cleared the value)
   - battery = 0x35 = 53 from direct GATT read of 0x2A19
 
-Protocol note:  OCLEANA1 is classified as Legacy once the model_id is known;
-in tests the coordinator starts as UNKNOWN but the read-fallback is triggered by
-the BleakError on fbb86 regardless of protocol, because UNKNOWN still tries to
-subscribe to fbb86 and will fail the same way.
+Protocol note:  OCLEANA1 is classified as Legacy once the model_id is known.
+The simulator answers the DIS model read with the battery byte unless a model is
+given; a poll without any model ID sends no command at all, so tests that need
+the A1 command path supply the real model ID ``OCLEANA1``.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from custom_components.oclean_ble.const import (
     DATA_LAST_BRUSH_DURATION,
     DATA_LAST_BRUSH_SCORE,
     DATA_LAST_BRUSH_TIME,
+    DIS_MODEL_UUID,
     READ_NOTIFY_CHAR_UUID,
 )
 from tests.integration_helpers import make_coordinator, run_poll
@@ -127,9 +128,9 @@ class TestOcleanA1ReadFallback:
 
         client = (
             OcleanDeviceSimulator()
-            .with_battery(0)  # GATT read would return 0 – skipped because 0303 sets battery first
+            .with_battery(0)  # GATT read would return 0 - skipped because 0303 sets battery first
             .with_notify_errors({READ_NOTIFY_CHAR_UUID: BleakError("no CCCD")})
-            .with_read_char_responses({READ_NOTIFY_CHAR_UUID: state_bytes})
+            .with_read_char_responses({READ_NOTIFY_CHAR_UUID: state_bytes, DIS_MODEL_UUID: b"OCLEANA1"})
             .build_client()
         )
         result = await run_poll(_coordinator(), client)
@@ -223,7 +224,12 @@ class TestOcleanA1NoCccdSubscribe:
                 # Second call (after fake-CCCD inject): succeed and deliver push
                 handler(None, bytearray(state_0303))
 
-        client = OcleanDeviceSimulator().with_battery(0).build_client()
+        client = (
+            OcleanDeviceSimulator()
+            .with_battery(0)
+            .with_read_char_responses({DIS_MODEL_UUID: b"OCLEANA1"})
+            .build_client()
+        )
         client.start_notify = AsyncMock(side_effect=_start_notify)
 
         result = await run_poll(_coordinator(), client)

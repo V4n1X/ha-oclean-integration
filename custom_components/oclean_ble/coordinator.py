@@ -159,6 +159,16 @@ def err_is_invalid_handle(err: BaseException) -> bool:
     return "Invalid handle" in text and "handle=65534" in text
 
 
+def _is_proxy_client(client: BleakClient) -> bool:
+    """True when *client* runs on an ESPHome BLE proxy backend (bleak-esphome)."""
+    backend = getattr(client, "_backend", None)
+    api = getattr(backend, "_client", None)
+    return (
+        getattr(api, "bluetooth_gatt_start_notify", None) is not None
+        and getattr(backend, "_address_as_int", None) is not None
+    )
+
+
 async def _try_subscribe_no_cccd_via_proxy(  # noqa: PLR0911 - one exit per failure mode
     client: BleakClient,
     char_uuid: str,
@@ -314,7 +324,9 @@ class _Y3sLink:
     previous one on fbb86. Replies echo the command's first two bytes; set and clear
     commands end with ASCII "OK"; the device info arrives in two notifications that
     are reassembled here; a lone 0x02 means "unsupported command". Notifications that
-    do not belong to the command in flight are ignored.
+    do not belong to the command in flight are ignored, and so are notifications from
+    the other characteristic: replies come on fbb86, the 0307 dump on fbb90. (A sender
+    without a UUID - only in tests - is routed by state alone.)
     """
 
     def __init__(self, log: logging.Logger | logging.LoggerAdapter[Any]) -> None:
@@ -327,12 +339,18 @@ class _Y3sLink:
         self._stream: Y3sRunningDataStream | None = None
         self._stream_progress = asyncio.Event()
 
-    def on_notify(self, _sender: Any, raw: bytearray) -> None:
+    def on_notify(self, sender: Any, raw: bytearray) -> None:  # noqa: PLR0911 - one exit per routing case
         data = bytes(raw)
-        self._log.debug("Y3S notification: %s", data.hex())
+        source = str(getattr(sender, "uuid", "") or "").lower()
+        self._log.debug("Y3S notification from %s: %s", source[-4:] or "?", data.hex())
         if self._stream is not None:
+            if source and source != RECEIVE_BRUSH_UUID:
+                self._log.debug("Y3S: notification outside the dump characteristic ignored")
+                return
             self._stream.feed(data)
             self._stream_progress.set()
+            return
+        if source and source != READ_NOTIFY_CHAR_UUID:
             return
         if not self._prefix or self._done.is_set():
             return
@@ -630,6 +648,18 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         # Model ID once identified (persisted), so a later failed DIS read cannot
         # fall back to the generic UNKNOWN profile.
         self._identified_model: str | None = None
+        # OCLEANY3S: set (and persisted) when a 0307 dump broke off. Scheduled polls
+        # then never send 0307 again - re-sending after a broken dump is how the
+        # official app keeps a locked-up brush locked. Cleared by a complete dump
+        # (only after the user pressed Update Now) or by Clear Stored Sessions.
+        self._y3s_dump_blocked: bool = False
+        # Set for the duration of a poll started with the Update Now button.
+        self._y3s_retry_dump: bool = False
+        # OCLEANY3S: sessions read from the brush but not yet imported. Saved before
+        # 0202 clears them on the brush, removed after a successful import.
+        self._y3s_pending_sessions: list[dict[str, Any]] = []
+        # Repeating Y3S warnings already logged in this run (see _y3s_warn_once).
+        self._y3s_warned: set[str] = set()
 
         # Smart polling: optional time windows + post-brush cooldown.
         self._poll_windows: list[tuple[_dtime, _dtime]] = _parse_poll_windows(poll_windows)
@@ -745,7 +775,13 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
             raise BleakError(f"{description} timed out after {BLE_ACTION_TOTAL_TIMEOUT}s") from err
 
     async def _connect_and_run(self, action: Callable[[BleakClient], Awaitable[None]]) -> None:
-        """Connect, wait for the GATT table, run *action*, always disconnect."""
+        """Connect, wait for the GATT table, run *action*, always disconnect.
+
+        Raises BleakError without connecting while the model is not identified yet:
+        no command goes to a brush whose command set is unknown.
+        """
+        if not self._known_model_id():
+            raise BleakError("the brush model is not identified yet – wait for the first successful poll")
         if self.is_verified_y3s:
             # After a restart no poll may have selected the profile yet; actions on
             # the OCLEANY3S must already use it (0201 time frame, acknowledged writes).
@@ -837,9 +873,15 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         await self._run_ble_action("sync time", _action)
 
     async def _y3s_send_acked(self, client: BleakClient, frames: list[bytes]) -> None:
-        """OCLEANY3S: write *frames* to fbb85 one by one; each must be answered with OK."""
+        """OCLEANY3S: write *frames* to fbb85 one by one; each must be answered with OK.
+
+        Nothing is written when the replies on fbb86 cannot be received, because the
+        brush's confirmation could not be checked.
+        """
         link = _Y3sLink(self._log)
-        await self._subscribe_notifications(client, link.on_notify)
+        subscribed = await self._subscribe_notifications(client, link.on_notify)
+        if READ_NOTIFY_CHAR_UUID not in subscribed:
+            raise BleakError(f"replies on {READ_NOTIFY_CHAR_UUID} cannot be received – nothing sent")
         for frame in frames:
             if not await link.command(client, frame):
                 raise BleakError(f"command {frame.hex()} was not acknowledged by the brush")
@@ -852,30 +894,36 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         if not self.feature_supported(key):
             raise ValueError(f"{key} is not supported on this model")
 
+    def _known_model_id(self) -> str | None:
+        """The model ID from the last poll, the pinned identification or the current data."""
+        return (
+            self._last_raw.get(DATA_MODEL_ID)
+            or self._identified_model
+            or (self.data.model_id if self.data is not None else None)
+        )
+
     @property
     def is_verified_y3s(self) -> bool:
         """True when the known model uses the hardware-verified OCLEANY3S profile."""
-        model_id = self._last_raw.get(DATA_MODEL_ID) or (self.data.model_id if self.data else None)
-        return protocol_for_model(model_id).verified_y3s_flow
+        return protocol_for_model(self._known_model_id()).verified_y3s_flow
 
     async def async_clear_stored_sessions(self) -> None:
         """OCLEANY3S only: delete every session stored on the brush (0202).
 
         Recovery for a session store that has grown beyond the safe dump limit
-        (Y3S_MAX_SAFE_STORED_SESSIONS); the deleted sessions are not imported.
+        (Y3S_MAX_SAFE_STORED_SESSIONS) or whose download broke off; the deleted
+        sessions are not imported. Lifts the broken-download block.
         Raises ValueError on other models, BleakError if the brush does not confirm.
         """
         if not self.is_verified_y3s:
             raise ValueError("clearing stored sessions is only supported on the OCLEANY3S")
 
         async def _action(client: BleakClient) -> None:
-            link = _Y3sLink(self._log)
-            await self._subscribe_notifications(client, link.on_notify)
-            if not await link.command(client, CMD_Y3S_CLEAR_RUNNING_DATA):
-                raise BleakError("clearing the stored sessions was not acknowledged")
+            await self._y3s_send_acked(client, [CMD_Y3S_CLEAR_RUNNING_DATA])
             self._log.info("Y3S: all stored sessions deleted on the brush")
 
         await self._run_ble_action("clear stored sessions", _action)
+        await self._y3s_set_dump_blocked(False)
 
     @property
     def area_remind(self) -> bool | None:
@@ -1101,17 +1149,23 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
 
         return None
 
-    async def async_poll_now(self) -> None:
+    async def async_poll_now(self, retry_session_download: bool = False) -> None:
         """User-requested poll: bypass window/cooldown restrictions once.
 
         Used by the poll button and the oclean_ble.poll service. Scheduled
         polls keep honouring the smart-polling gates (_poll_skip_reason).
+
+        *retry_session_download* (Update Now button only): on the OCLEANY3S, allow
+        one 0307 dump although the previous dump broke off. The service never
+        sets it, so an automation cannot re-send 0307 in a loop.
         """
         self._force_poll_once = True
+        self._y3s_retry_dump = retry_session_download
         try:
             await self.async_refresh()
         finally:
             self._force_poll_once = False
+            self._y3s_retry_dump = False
 
     def _resolve_ble_device(self) -> BLEDevice:
         """BLEDevice from HA Bluetooth registry; raises BleakError if not found."""
@@ -1140,6 +1194,8 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
             self._brush_head_sw_count = stored.get("brush_head_sw_count", 0)
             self._active_scheme_pnum = stored.get("active_scheme_pnum")
             self._identified_model = stored.get("identified_model")
+            self._y3s_dump_blocked = bool(stored.get("y3s_dump_blocked", False))
+            self._y3s_pending_sessions = list(stored.get("y3s_pending_sessions") or [])
             last_session = stored.get("last_session", {})
             if last_session:
                 self._last_raw.update(last_session)
@@ -1165,6 +1221,8 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                 "brush_head_sw_count": self._brush_head_sw_count,
                 "active_scheme_pnum": self._active_scheme_pnum,
                 "identified_model": self._identified_model,
+                "y3s_dump_blocked": self._y3s_dump_blocked,
+                "y3s_pending_sessions": self._y3s_pending_sessions,
                 "last_session": last_session,
             }
         )
@@ -1241,6 +1299,8 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
             if new_ts > self._last_session_ts:
                 self._last_session_ts = new_ts
                 self._log.debug("updated last_session_ts to %d", self._last_session_ts)
+            # Imported: sessions saved before an OCLEANY3S 0202 are no longer needed.
+            self._y3s_pending_sessions = []
 
         # Post-brush cooldown: pause polling for N hours after a new session
         if new_session_count > 0 and self._post_brush_cooldown_s > 0:
@@ -1515,9 +1575,20 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         The DIS read comes first so that a verified profile (OCLEANY3S) is known
         before anything is written. For every other model the time calibration
         still uses the profile known before the DIS read, as it always did.
+
+        Without any model ID (DIS model read failed and no model identified
+        before) nothing is written at all: the generic discovery profile would
+        send 0202 and an unguarded 0307, which on the OCLEANY3S delete the stored
+        sessions or lock the firmware up, and the model cannot be told apart.
         """
         protocol_before_dis = self._protocol
         await self._read_device_info_service(client, collected)
+        if self._protocol is UNKNOWN:
+            self._log.warning("model ID could not be read – no command sent in this poll; the next poll reads it again")
+            # Not a subscription problem: no immediate reconnect retry.
+            self._last_subscribe_ok = True
+            await self._read_battery_and_unsubscribe(client, collected)
+            return
         if self._protocol.verified_y3s_flow:
             await self._run_y3s_queries(client, collected, all_sessions)
             return
@@ -1612,8 +1683,12 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
           3. 0303 battery        -> battery %, number of stored sessions
           4. 0307 running data   -> only when it is safe (see _y3s_dump_skip_reason)
           5. 0202 clear          -> only after a complete dump, like the official app;
-                                    without it the store grows until 0307 locks up
+                                    without it the store grows until 0307 locks up.
+                                    The sessions are saved to the store first, so a
+                                    timeout or failed import cannot lose them.
         """
+        # Sessions saved before an earlier 0202 but not imported yet (poll aborted).
+        self._accept_y3s_sessions([dict(s) for s in self._y3s_pending_sessions], collected, all_sessions)
         link = _Y3sLink(self._log)
         subscribed = await self._subscribe_notifications(client, link.on_notify)
         await self._subscribe_battery_notifications(client, collected)
@@ -1637,37 +1712,74 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
             stored = battery.get(Y3S_BATTERY_STORED_SESSIONS)
             if DATA_BATTERY in battery:
                 collected[DATA_BATTERY] = battery[DATA_BATTERY]
+        if stored == 0:
+            # The store was emptied elsewhere (e.g. the official app): nothing left
+            # that could break a download again.
+            await self._y3s_set_dump_blocked(False)
 
         skip_reason = self._y3s_dump_skip_reason(stored, collected.get(DATA_BATTERY), subscribed)
         if skip_reason:
             self._log.debug("Y3S: running data not read (%s)", skip_reason)
         else:
             stream = await link.read_running_data(client)
-            self._accept_y3s_records(stream.records(), collected, all_sessions)
-            if stream.complete and stream.count:
-                if await link.command(client, CMD_Y3S_CLEAR_RUNNING_DATA):
-                    self._log.info("Y3S: %d session(s) read and cleared from the brush", stream.count)
-                else:
-                    self._log.warning("Y3S: clearing the session store was not acknowledged")
-            elif not stream.complete:
-                # Never re-send 0307 right away: a dump that breaks off is how the
-                # firmware lock-up starts. The next poll retries with fresh 0303 data.
-                self._log.warning("Y3S: incomplete running-data dump – sessions kept on the brush")
+            self._accept_y3s_sessions(
+                [parsed for parsed in map(parse_y3s_record, stream.records()) if parsed], collected, all_sessions
+            )
+            if stream.complete:
+                await self._y3s_set_dump_blocked(False)
+                if stream.count:
+                    # Saved before the brush deletes them: a timeout after 0202 or a
+                    # failed import keeps them for the next poll.
+                    self._y3s_pending_sessions = [dict(s) for s in all_sessions]
+                    await self._save_store()
+                    if await link.command(client, CMD_Y3S_CLEAR_RUNNING_DATA):
+                        self._log.info("Y3S: %d session(s) read and cleared from the brush", stream.count)
+                    else:
+                        self._log.warning("Y3S: clearing the session store was not acknowledged")
+            else:
+                # Never re-send 0307 automatically after a broken dump: that is how
+                # the official app keeps a locked-up brush locked (rule 8).
+                await self._y3s_set_dump_blocked(True)
+                self._log.warning(
+                    "Y3S: the session download broke off (%d of %d bytes). Sessions stay on the brush, and "
+                    "scheduled polls will not request them again. Press 'Update Now' to retry once, or "
+                    "'Clear Stored Sessions' to delete them on the brush.",
+                    stream.received_bytes,
+                    stream.expected_bytes,
+                )
 
         await self._read_battery_and_unsubscribe(client, collected)
 
-    def _y3s_dump_skip_reason(self, stored: int | None, battery: int | None, subscribed: frozenset[str]) -> str | None:
+    async def _y3s_set_dump_blocked(self, blocked: bool) -> None:
+        """Set and persist the broken-dump block (persisted at once: a lock-up ends the poll)."""
+        if self._y3s_dump_blocked != blocked:
+            self._y3s_dump_blocked = blocked
+            self._y3s_warned.discard("blocked")
+            await self._save_store()
+
+    def _y3s_dump_skip_reason(  # noqa: PLR0911 - one exit per safety rule
+        self, stored: int | None, battery: int | None, subscribed: frozenset[str]
+    ) -> str | None:
         """Return why 0307 must not be sent now, or None when the dump is safe."""
         if RECEIVE_BRUSH_UUID not in subscribed:
             return f"no subscription on {RECEIVE_BRUSH_UUID}"
         if stored is None:
-            return "number of stored sessions unknown (no 0303 reply)"
+            return "number of stored sessions unknown (no usable 0303 reply)"
         if stored == 0:
             return "no sessions stored"
+        if self._y3s_dump_blocked and not self._y3s_retry_dump:
+            self._y3s_warn_once(
+                "blocked",
+                "Y3S: %d session(s) stored, but the last download broke off – not requested again "
+                "automatically. Press 'Update Now' to retry once, or 'Clear Stored Sessions'.",
+                stored,
+            )
+            return "the previous download broke off"
         if battery is not None and battery < Y3S_MIN_BATTERY_FOR_DUMP:
             return f"battery at {battery} %"
         if stored > Y3S_MAX_SAFE_STORED_SESSIONS:
-            self._log.warning(
+            self._y3s_warn_once(
+                "too_many",
                 "Y3S: the brush stores %d sessions. Reading that many locked up the firmware in tests "
                 "(no connection until the battery was completely empty), so they are not read. "
                 "Enable and press the 'Clear Stored Sessions' button to delete them; "
@@ -1675,7 +1787,16 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                 stored,
             )
             return f"{stored} stored sessions exceed the safe limit of {Y3S_MAX_SAFE_STORED_SESSIONS}"
+        self._y3s_warned.discard("too_many")
         return None
+
+    def _y3s_warn_once(self, key: str, msg: str, *args: Any) -> None:
+        """Log a condition that repeats on every poll as a warning once per run, then at debug level."""
+        if key in self._y3s_warned:
+            self._log.debug(msg, *args)
+            return
+        self._y3s_warned.add(key)
+        self._log.warning(msg, *args)
 
     def _apply_y3s_device_info(self, info: dict[str, Any], collected: dict[str, Any]) -> None:
         """Copy device-info fields into the poll result and read back the device settings."""
@@ -1687,21 +1808,20 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
         self._over_pressure = info[Y3S_INFO_OVER_PRESSURE]
         self._active_scheme_pnum = info[Y3S_INFO_ACTIVE_PNUM]
 
-    def _accept_y3s_records(
+    def _accept_y3s_sessions(
         self,
-        records: list[bytes],
+        sessions: list[dict[str, Any]],
         collected: dict[str, Any],
         all_sessions: list[dict[str, Any]],
     ) -> None:
-        """Parse dumped records; the newest one becomes the "last session" snapshot."""
+        """Add parsed sessions (deduplicated by time); the newest becomes the "last session" snapshot."""
         seen = {s.get(DATA_LAST_BRUSH_TIME) for s in all_sessions}
-        for record in records:
-            parsed = parse_y3s_record(record)
-            ts = parsed.get(DATA_LAST_BRUSH_TIME)
+        for session in sessions:
+            ts = session.get(DATA_LAST_BRUSH_TIME)
             if not ts or ts in seen:
                 continue
             seen.add(ts)
-            all_sessions.append(parsed)
+            all_sessions.append(session)
         if not all_sessions:
             return
         newest = max(all_sessions, key=lambda s: s[DATA_LAST_BRUSH_TIME])
@@ -1986,21 +2106,21 @@ class OcleanCoordinator(DataUpdateCoordinator[OcleanDeviceData]):
                         )
                 else:
                     is_no_cccd = "does not have a characteristic client config descriptor" in str(err)
+                    verified_y3s = self._protocol.verified_y3s_flow
                     # bleak-esphome reports the same situation as "Invalid handle"
                     # on the descriptor it writes after registering the proxy side.
-                    if is_no_cccd or err_is_invalid_handle(err):
+                    if is_no_cccd or (verified_y3s and err_is_invalid_handle(err)):
                         self._log.debug("no usable CCCD on %s - trying no-CCCD subscribe path", char_uuid)
-                        if await _try_subscribe_no_cccd(
-                            client,
-                            char_uuid,
-                            handler,
-                            self._log,
-                        ) or await _try_subscribe_no_cccd_via_proxy(
-                            client,
-                            char_uuid,
-                            handler,
-                            self._log,
-                        ):
+                        if verified_y3s and _is_proxy_client(client):
+                            # OCLEANY3S through an ESPHome proxy: register on the proxy
+                            # without any descriptor write. The placeholder-CCCD path
+                            # would send ATT writes to handle 0xFFFE to the brush.
+                            ok = await _try_subscribe_no_cccd_via_proxy(client, char_uuid, handler, self._log)
+                        else:
+                            # Every other model (and the OCLEANY3S on a local
+                            # adapter) keeps the original no-CCCD path.
+                            ok = await _try_subscribe_no_cccd(client, char_uuid, handler, self._log)
+                        if ok:
                             subscribed.add(char_uuid)
                     else:
                         self._log.debug(

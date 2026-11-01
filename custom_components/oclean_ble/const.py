@@ -119,8 +119,9 @@ OCLEAN_TZ_OFFSETS_MIN: tuple[int, ...] = (
 # captures of the official app (Oclean Care+ 4.0.4) and replays by an own client.
 # Only frames seen on the wire are used; every other model keeps the generic
 # TYPE1 path. Wire format of the replies:
-#   030201 (fbb85) -> two notifies on fbb86: "0302 23 24 <16 B>" + "0302 <18 B>"
-#                     = 34-byte device-info payload (length byte 0x24 - 2)
+#   030201 (fbb85) -> two notifies on fbb86: "0302 23 24 <16 B>" + "0302 <19 B>";
+#                     the first 34 bytes are the device-info payload (length byte 0x24 - 2),
+#                     the second notify may arrive after the write response
 #   0201 <time>    -> "0201 4F 4B"
 #   0303 (fbb85)   -> "0303 <status> <mV:2 BE> <battery %> <stored sessions> 00"
 #   0307 (fbb89)   -> fbb90 stream "0307 2A 42 23 <count:2 BE>" + count x 42 bytes,
@@ -146,8 +147,12 @@ Y3S_MIN_BATTERY_FOR_DUMP = 3
 # the clock was lost in a full discharge) as error records and does not show them.
 Y3S_MIN_RECORD_YEAR = 2017
 # Timeout for one command's reply on fbb86 and for a silent gap inside the 0307 stream.
-Y3S_REPLY_TIMEOUT = 5.0
-Y3S_STREAM_IDLE_TIMEOUT = 3.0
+# Replies came up to 4.5 s late while the motor ran; normally they take ~0.1 s.
+Y3S_REPLY_TIMEOUT = 8.0
+Y3S_STREAM_IDLE_TIMEOUT = 8.0
+# Every record ends with 7 bytes 0xFF (35-41); all records in the captures do. A
+# record without them was cut or shifted (e.g. a lost notification) and is dropped.
+Y3S_RECORD_FILLER = b"\xff" * 7
 
 # Config entry keys
 CONF_MAC_ADDRESS = "mac_address"
